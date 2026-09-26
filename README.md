@@ -1,8 +1,10 @@
-# MadEdit2
+# <img src="images/madedit2-icon256.png" width="48" alt="MadEdit2 icon" align="top"> MadEdit2
 
 MadEdit2 is a fast text and hex editor for very large files. It opens multi gigabyte files instantly, edits them in place, and runs natively on Windows, macOS and Linux.
 
 It is free software. Prebuilt binaries are provided on the [Releases](https://github.com/madedit/madedit2/releases) page.
+
+![MadEdit2 editing a Markdown file on Windows](images/madedit2-1.png)
 
 ## Features
 
@@ -30,7 +32,7 @@ Prebuilt packages for Windows, macOS and Linux are attached to every release on 
 
 * **Windows**: `madedit2-<version>-windows-x64.zip` — unzip anywhere and run `madedit2.exe`; settings live next to the executable (portable).
 * **macOS**: `madedit2-<version>.dmg` — signed and notarized; drag the app to Applications.
-* **Linux**: `madedit2-<version>-linux-x64.tar.gz` — built on AlmaLinux 9 (glibc 2.34), so it runs on RHEL/Rocky/Alma 9+, Ubuntu 22.04+, Debian 12+, Fedora and other distributions with glibc 2.34 or newer.
+* **Linux**: `madedit2-<version>-linux-x86_64.tar.gz` — built on AlmaLinux 9 (glibc 2.34), so it runs on RHEL/Rocky/Alma 9+, Ubuntu 22.04+, Debian 12+, Fedora and other distributions with glibc 2.34 or newer.
 
 ## Support the project
 
