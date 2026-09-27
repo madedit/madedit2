@@ -1,0 +1,7 @@
+{
+  "language": "gdshader",
+  "extensions": [
+    "gdshader",
+    "gdshaderinc"
+  ]
+}

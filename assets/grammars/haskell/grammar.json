@@ -1,0 +1,7 @@
+{
+  "language": "haskell",
+  "extensions": [
+    "hs",
+    "hs-boot"
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "language": "ada",
+  "extensions": [
+    "ads",
+    "adb"
+  ]
+}

@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- MadEdit 2 app icon: six comic-style fangs forming an "M".
+       Mobile-icon compliant: full-bleed square background (no rounded
+       corners, no transparency; iOS/Android apply their own masks) and the
+       M fits inside the adaptive-icon safe zone (center circle, 61% of the
+       canvas), so circle/squircle launcher masks never clip it. -->
+  <defs>
+    <!-- flat cel shading: hard stop, light left / shaded right -->
+    <linearGradient id="celShort" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.5" stop-color="#FFFFFF"/>
+      <stop offset="0.5" stop-color="#C3CEDA"/>
+      <stop offset="1" stop-color="#C3CEDA"/>
+    </linearGradient>
+    <linearGradient id="celLong" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.45" stop-color="#FFFFFF"/>
+      <stop offset="0.45" stop-color="#A9B6C6"/>
+      <stop offset="1" stop-color="#A9B6C6"/>
+    </linearGradient>
+    
+    
+  </defs>
+
+  <!-- full-bleed square background: must stay un-rounded and opaque -->
+  <rect width="256" height="256" fill="#CDF2F9"/>
+
+  <!-- fang M body: 6 fangs, inked outlines + flat cel fills -->
+  <g stroke="#14161A" stroke-width="7" stroke-linejoin="round">
+  <!-- whole-M sizing: scale 0.7 keeps every fang inside the safe circle
+       (center 128,128 r78); don't raise it past ~0.7 for adaptive icons -->
+  <g transform="translate(128 128) scale(0.9) translate(-128 -137)">
+
+    <!-- 1. left long fang -->
+    <path d="M 46 68 C 58 66 68 74 74 84 C 70 126 62 172 52 208 C 42 162 40 112 46 68 Z" fill="url(#celLong)"/>
+
+    <!-- 2. left middle fang (slightly larger than the center pair) -->
+    <path d="M 82 86 C 92 84 100 90 106 98 C 102 126 96 148 92 164 C 86 142 82 116 82 86 Z" fill="url(#celShort)"
+          transform="translate(94 94) scale(0.65) translate(-94 -86)" stroke-width="10.8"/>
+
+    <!-- 3. left center fang -->
+    <path d="M 112 102 C 118 100 123 104 126 110 C 124 124 121 135 118 142 C 114 130 112 118 112 102 Z" fill="url(#celShort)"/>
+
+    <!-- 4. right center fang -->
+    <path d="M 144 102 C 138 100 133 104 130 110 C 132 124 135 135 138 142 C 142 130 144 118 144 102 Z" fill="url(#celShort)"/>
+
+    <!-- 5. right middle fang (slightly larger than the center pair) -->
+    <path d="M 174 86 C 164 84 156 90 150 98 C 154 126 160 148 164 164 C 170 142 174 116 174 86 Z" fill="url(#celShort)"
+          transform="translate(162 94) scale(0.65) translate(-162 -86)" stroke-width="10.8"/>
+
+    <!-- 6. right long fang -->
+    <path d="M 210 68 C 198 66 188 74 182 84 C 186 126 194 172 204 208 C 214 162 216 112 210 68 Z" fill="url(#celLong)"/>
+
+  </g>
+  </g>
+
+  <!-- sparkle stars, white with ink outline - - >
+  <g fill="#FFFFFF" stroke="#14161A" stroke-width="3" stroke-linejoin="round">
+    <path d="M 74 52 L 78 62 L 88 66 L 78 70 L 74 80 L 70 70 L 60 66 L 70 62 Z"/>
+    <path d="M 196 150 L 199 157 L 206 160 L 199 163 L 196 170 L 193 163 L 186 160 L 193 157 Z"/>
+  </g>
+  -->
+</svg>

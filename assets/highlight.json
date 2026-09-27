@@ -1,0 +1,101 @@
+{
+  "_comment": "Lexer config for the pure-Dart fallback highlighter (used when no tree-sitter grammar covers the file). External settings/highlight.json overrides this bundled default. Per-language fields: extensions (required), keywords, types, constants, lineComment (default \"//\"), hashComment (also treat # as a line comment, default false), blockComment (/* */ supported, default true), backtickString (` strings, default false).",
+  "plainExtensions": ["txt", "log", "md", "csv", "tsv"],
+  "default": {
+    "keywords": [
+      "if", "else", "for", "while", "do", "switch", "case", "default",
+      "break", "continue", "return", "goto", "sizeof", "typedef", "struct",
+      "union", "enum", "static", "const", "volatile", "extern", "inline",
+      "void", "int", "char", "float", "double", "long", "short", "unsigned",
+      "signed", "var", "let", "function", "new", "delete", "typeof",
+      "instanceof", "in", "of", "class", "extends", "super", "this",
+      "import", "export", "from", "as", "async", "await", "yield", "try",
+      "catch", "finally", "throw", "with"
+    ],
+    "constants": ["true", "false", "null", "nil", "None", "True", "False", "undefined"]
+  },
+  "languages": [
+    {
+      "name": "dart",
+      "extensions": ["dart"],
+      "keywords": [
+        "var", "final", "const", "void", "dynamic", "class", "extends",
+        "implements", "with", "mixin", "abstract", "enum", "return", "if",
+        "else", "for", "while", "do", "switch", "case", "default", "break",
+        "continue", "new", "this", "super", "import", "export", "library",
+        "part", "as", "show", "hide", "async", "await", "yield", "try",
+        "catch", "finally", "throw", "rethrow", "is", "in", "get", "set",
+        "factory", "late", "required", "typedef", "on", "operator", "static"
+      ],
+      "constants": ["true", "false", "null", "nil", "None", "True", "False", "undefined"]
+    },
+    {
+      "name": "javascript",
+      "extensions": ["js", "jsx", "ts", "tsx", "mjs"],
+      "keywords": [
+        "var", "let", "const", "function", "return", "if", "else", "for",
+        "while", "do", "switch", "case", "default", "break", "continue",
+        "new", "delete", "typeof", "instanceof", "in", "of", "class",
+        "extends", "super", "this", "import", "export", "from", "as",
+        "async", "await", "yield", "try", "catch", "finally", "throw",
+        "void", "with"
+      ],
+      "constants": ["true", "false", "null", "nil", "None", "True", "False", "undefined"],
+      "backtickString": true
+    },
+    {
+      "name": "python",
+      "extensions": ["py"],
+      "keywords": [
+        "def", "class", "return", "if", "elif", "else", "for", "while",
+        "try", "except", "finally", "with", "as", "import", "from",
+        "lambda", "pass", "break", "continue", "raise", "yield", "global",
+        "nonlocal", "assert", "del", "and", "or", "not", "in", "is",
+        "async", "await"
+      ],
+      "constants": ["true", "false", "null", "nil", "None", "True", "False", "undefined"],
+      "lineComment": "#",
+      "hashComment": true,
+      "blockComment": false
+    },
+    {
+      "name": "json",
+      "extensions": ["json"],
+      "keywords": [],
+      "constants": ["true", "false", "null", "nil", "None", "True", "False", "undefined"],
+      "blockComment": false
+    },
+    {
+      "name": "shell",
+      "extensions": ["sh", "bash", "yaml", "yml", "toml"],
+      "keywords": [],
+      "lineComment": "#",
+      "hashComment": true,
+      "blockComment": false
+    },
+    {
+      "name": "c-family",
+      "extensions": ["c", "h", "cpp", "cc", "hpp", "java", "go", "rs"],
+      "keywords": [
+        "if", "else", "for", "while", "do", "switch", "case", "default",
+        "break", "continue", "return", "goto", "sizeof", "typedef",
+        "struct", "union", "enum", "static", "const", "volatile", "extern",
+        "inline", "void", "int", "char", "float", "double", "long",
+        "short", "unsigned", "signed"
+      ],
+      "constants": ["true", "false", "null", "nil", "None", "True", "False", "undefined"]
+    },
+    {
+      "name": "lua",
+      "extensions": ["lua"],
+      "keywords": [
+        "and", "break", "do", "else", "elseif", "end", "for", "function",
+        "goto", "if", "in", "local", "not", "or", "repeat", "return",
+        "then", "until", "while"
+      ],
+      "constants": ["true", "false", "nil"],
+      "lineComment": "--",
+      "blockComment": false
+    }
+  ]
+}

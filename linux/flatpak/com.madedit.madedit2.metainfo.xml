@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata: shown by GNOME Software / KDE Discover, required by
+     Flathub. zlinux_build.sh fills in the version and date from pubspec.yaml
+     at build time (the <release> line below is a template). -->
+<component type="desktop-application">
+  <id>com.madedit.madedit2</id>
+  <name>MadEdit 2</name>
+  <summary>Large-file text and hex editor</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      MadEdit 2 opens multi-gigabyte files instantly and edits them in place:
+      text, column (rectangular) and hex modes, syntax highlighting for about
+      fifty languages, 39 text encodings, find/replace across files, diff and
+      three-way merge, macros, user scripts in JavaScript and Lua, and
+      vscode/vim key bindings.
+    </p>
+  </description>
+  <launchable type="desktop-id">com.madedit.madedit2.desktop</launchable>
+  <provides>
+    <binary>madedit2</binary>
+  </provides>
+  <categories>
+    <category>Utility</category>
+    <category>TextEditor</category>
+    <category>Development</category>
+  </categories>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="@VERSION@" date="@DATE@" />
+  </releases>
+</component>

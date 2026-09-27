@@ -1,0 +1,10 @@
+{
+  "language": "glsl",
+  "extensions": [
+    "vert",
+    "frag",
+    "vsh",
+    "fsh",
+    "glsl"
+  ]
+}

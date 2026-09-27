@@ -1,0 +1,11 @@
+{
+  "language": "bash",
+  "extensions": [
+    "sh",
+    "bash",
+    "bashrc",
+    "bash_profile",
+    "ebuild",
+    "eclass"
+  ]
+}

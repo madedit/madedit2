@@ -1,0 +1,8 @@
+{
+  "language": "asm",
+  "extensions": [
+    "s",
+    "asm",
+    "assembly"
+  ]
+}

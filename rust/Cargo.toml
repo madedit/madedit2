@@ -1,0 +1,33 @@
+[package]
+name = "rust_lib_madedit2"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+flutter_rust_bridge = "=2.13.0"
+# wasm feature: loads .wasm grammars (syntax plugins) dynamically via wasmtime.
+# Cost: pulls in wasmtime + cranelift; long first compile and a much larger native library.
+tree-sitter = { version = "0.26", features = ["wasm"] }
+tree-sitter-highlight = "0.26"
+# Iterating tree-sitter query captures (StreamingIterator) for the incremental highlight sessions.
+streaming-iterator = "0.1"
+tree-sitter-json = "0.24"
+# Only to turn down the log level flutter_rust_bridge sets up (see api::simple::init_app).
+log = "0.4"
+# User scripting plugin: QuickJS engine for text-transform scripts (settings/scripts/*.js).
+rquickjs = "0.12"
+# Second scripting engine: Lua 5.4 for settings/scripts/*.lua (same host contract).
+mlua = { version = "0.12", features = ["lua54", "vendored"] }
+
+# Optimize dependencies even in debug builds: tree-sitter + wasmtime are ~6x slower unoptimized,
+# which made whole-file highlighting unusable under `flutter run` (cargokit builds cargo in the
+# same mode as Flutter). Only deps are optimized, so our own crate still builds fast and debuggable.
+# Cost: one slow first build of the dependency tree.
+[profile.dev.package."*"]
+opt-level = 3
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

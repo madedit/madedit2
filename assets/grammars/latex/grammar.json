@@ -1,0 +1,9 @@
+{
+  "language": "latex",
+  "extensions": [
+    "tex",
+    "aux",
+    "sty",
+    "cls"
+  ]
+}

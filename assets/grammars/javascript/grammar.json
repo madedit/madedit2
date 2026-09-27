@@ -1,0 +1,9 @@
+{
+  "language": "javascript",
+  "extensions": [
+    "js",
+    "mjs",
+    "cjs",
+    "jsx"
+  ]
+}

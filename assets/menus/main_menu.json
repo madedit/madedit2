@@ -1,0 +1,228 @@
+{
+  "menus": [
+    {
+      "labelKey": "menu_file",
+      "submenu": [
+        { "labelKey": "item_new", "shortcut": "Ctrl+N", "action": "file.new", "icon": "note_add" },
+        { "labelKey": "item_new_window", "shortcut": "Ctrl+Shift+N", "action": "file.newWindow", "icon": "open_in_new" },
+        { "labelKey": "item_open", "shortcut": "Ctrl+O", "action": "file.open", "icon": "folder_open" },
+        { "labelKey": "item_quick_open", "action": "file.quickOpen", "icon": "search" },
+        { "labelKey": "menu_recent", "dynamic": "recent" },
+        { "labelKey": "item_save", "shortcut": "Ctrl+S", "action": "file.save", "icon": "save" },
+        { "labelKey": "item_save_as", "shortcut": "Ctrl+Shift+S", "action": "file.saveAs", "icon": "save_as" },
+        { "labelKey": "item_save_all", "action": "file.saveAll", "icon": "save" },
+        { "labelKey": "item_reload", "action": "file.reload", "icon": "refresh" },
+        { "labelKey": "item_read_only", "action": "file.readOnly" },
+        { "labelKey": "item_print", "action": "file.print", "icon": "print" },
+        { "labelKey": "item_build_index", "action": "file.buildIndex", "icon": "format_list_numbered" },
+        { "type": "separator" },
+        { "labelKey": "item_close_tab", "shortcut": "Ctrl+W", "action": "file.closeTab", "icon": "close" },
+        { "labelKey": "item_close_all", "action": "file.closeAll", "icon": "close" },
+        { "labelKey": "item_reopen_tab", "shortcut": "Ctrl+Shift+T", "action": "file.reopenTab", "icon": "restore_page" },
+        { "labelKey": "item_close_window", "shortcut": "Ctrl+Shift+W", "action": "file.closeWindow" },
+        { "type": "separator" },
+        { "labelKey": "item_exit", "action": "file.exit", "icon": "exit_to_app" }
+      ]
+    },
+    {
+      "labelKey": "menu_edit",
+      "submenu": [
+        { "labelKey": "item_undo", "shortcut": "Ctrl+Z", "action": "edit.undo", "icon": "undo" },
+        { "labelKey": "item_redo", "shortcut": "Ctrl+Y", "action": "edit.redo", "icon": "redo" },
+        { "type": "separator" },
+        { "labelKey": "item_cut", "shortcut": "Ctrl+X", "action": "edit.cut", "icon": "content_cut" },
+        { "labelKey": "item_copy", "shortcut": "Ctrl+C", "action": "edit.copy", "icon": "content_copy" },
+        { "labelKey": "item_paste", "shortcut": "Ctrl+V", "action": "edit.paste", "icon": "content_paste" },
+        { "labelKey": "item_clipboard_history", "shortcut": "Ctrl+Shift+V", "action": "edit.clipboardHistory", "icon": "history" },
+        { "type": "separator" },
+        { "labelKey": "item_select_all", "shortcut": "Ctrl+A", "action": "edit.selectAll" },
+        { "labelKey": "item_complete", "shortcut": "Ctrl+Space", "action": "edit.complete" },
+        { "labelKey": "item_column_editor", "shortcut": "Alt+C", "action": "edit.columnEditor", "icon": "view_column" },
+        { "type": "separator" },
+        {
+          "labelKey": "menu_lines",
+          "icon": "format_list_numbered",
+          "submenu": [
+            { "labelKey": "item_indent", "shortcut": "Tab", "action": "edit.indent" },
+            { "labelKey": "item_outdent", "shortcut": "Shift+Tab", "action": "edit.outdent" },
+            { "type": "separator" },
+            { "labelKey": "item_upper", "shortcut": "Ctrl+Shift+U", "action": "edit.upper" },
+            { "labelKey": "item_lower", "shortcut": "Ctrl+U", "action": "edit.lower" },
+            { "type": "separator" },
+            { "labelKey": "item_join_lines", "shortcut": "Ctrl+J", "action": "edit.joinLines" },
+            { "labelKey": "item_sort_asc", "action": "edit.sortAsc" },
+            { "labelKey": "item_sort_desc", "action": "edit.sortDesc" },
+            { "labelKey": "item_dedupe_lines", "action": "edit.dedupeLines" },
+            { "labelKey": "item_remove_empty_lines", "action": "edit.removeEmptyLines" },
+            { "labelKey": "item_trim_trailing", "action": "edit.trimTrailing" },
+            { "labelKey": "item_reverse_lines", "action": "edit.reverseLines" }
+          ]
+        },
+        {
+          "labelKey": "menu_multicursor",
+          "icon": "text_fields",
+          "submenu": [
+            { "labelKey": "item_cursor_add_above", "shortcut": "Ctrl+Alt+Up", "action": "cursor.addAbove" },
+            { "labelKey": "item_cursor_add_below", "shortcut": "Ctrl+Alt+Down", "action": "cursor.addBelow" },
+            { "type": "separator" },
+            { "labelKey": "item_cursor_select_all_occurrences", "shortcut": "Ctrl+Shift+L", "action": "cursor.selectAllOccurrences" },
+            { "labelKey": "item_cursor_add_next_occurrence", "shortcut": "Ctrl+Alt+D", "action": "cursor.addNextOccurrence" },
+            { "type": "separator" },
+            { "labelKey": "item_cursor_clear", "shortcut": "Esc", "action": "cursor.clear" }
+          ]
+        },
+        {
+          "labelKey": "menu_newline",
+          "icon": "keyboard_return",
+          "submenu": [
+            { "labelKey": "item_newline_crlf", "action": "newline.crlf" },
+            { "labelKey": "item_newline_lf", "action": "newline.lf" }
+          ]
+        }
+      ]
+    },
+    {
+      "labelKey": "menu_search",
+      "submenu": [
+        { "labelKey": "item_find", "shortcut": "Ctrl+F", "action": "search.find", "icon": "search" },
+        { "labelKey": "item_replace", "shortcut": "Ctrl+H", "action": "search.replace", "icon": "find_replace" },
+        { "labelKey": "item_find_next", "shortcut": "F3", "action": "search.findNext" },
+        { "labelKey": "item_find_prev", "shortcut": "Shift+F3", "action": "search.findPrev" },
+        { "labelKey": "item_find_in_files", "shortcut": "Ctrl+Shift+F", "action": "search.findInFiles", "icon": "folder_open" },
+        { "labelKey": "item_replace_in_files", "action": "search.replaceInFiles", "icon": "find_replace" },
+        { "type": "separator" },
+        { "labelKey": "item_nav_back", "action": "nav.back", "icon": "arrow_back" },
+        { "labelKey": "item_nav_forward", "action": "nav.forward", "icon": "arrow_forward" },
+        { "labelKey": "item_nav_last_edit", "action": "nav.lastEdit" },
+        { "type": "separator" },
+        { "labelKey": "item_bookmark_toggle", "shortcut": "Ctrl+F2", "action": "bookmark.toggle", "icon": "bookmark_add" },
+        { "labelKey": "item_bookmark_next", "shortcut": "F2", "action": "bookmark.next" },
+        { "labelKey": "item_bookmark_prev", "shortcut": "Shift+F2", "action": "bookmark.prev" },
+        { "labelKey": "item_bookmark_clear", "action": "bookmark.clearAll" },
+        { "labelKey": "item_bookmark_panel", "action": "bookmark.panel" },
+        { "type": "separator" },
+        { "labelKey": "item_goto_line", "shortcut": "Ctrl+G", "action": "search.gotoLine", "icon": "tag" },
+        { "labelKey": "item_goto_bracket", "shortcut": "Ctrl+M", "action": "caret.matchBracket" }
+      ]
+    },
+    {
+      "labelKey": "menu_view",
+      "submenu": [
+        {
+          "labelKey": "menu_mode",
+          "icon": "visibility",
+          "submenu": [
+            { "labelKey": "item_mode_text", "action": "view.mode.text" },
+            { "labelKey": "item_mode_column", "action": "view.mode.column" },
+            { "labelKey": "item_mode_hex", "action": "view.mode.hex" }
+          ]
+        },
+        {
+          "labelKey": "menu_wrap",
+          "icon": "wrap_text",
+          "submenu": [
+            { "labelKey": "item_wrap_off", "action": "wrap.off" },
+            { "labelKey": "item_wrap_columns", "action": "wrap.columns" },
+            { "labelKey": "item_wrap_window", "action": "wrap.window" }
+          ]
+        },
+        { "labelKey": "item_rtl_layout", "action": "view.rtlLayout" },
+        { "type": "separator" },
+        { "labelKey": "item_split_right", "action": "view.splitRight", "icon": "vertical_split" },
+        { "labelKey": "item_explorer", "shortcut": "Ctrl+B", "action": "view.explorer", "icon": "folder_open" },
+        { "labelKey": "item_outline", "action": "view.outline", "icon": "segment" },
+        { "labelKey": "item_command_palette", "shortcut": "Ctrl+Shift+P", "action": "view.commandPalette", "icon": "search" },
+        { "labelKey": "item_word_count", "action": "view.wordCount", "icon": "calculate" },
+        { "labelKey": "item_diff", "action": "view.diff", "icon": "difference" },
+        { "labelKey": "item_merge3", "action": "view.merge3", "icon": "call_merge" },
+        { "type": "separator" },
+        { "labelKey": "item_zoom_in", "shortcut": "Ctrl+=", "action": "view.zoomIn", "icon": "zoom_in" },
+        { "labelKey": "item_zoom_out", "shortcut": "Ctrl+-", "action": "view.zoomOut", "icon": "zoom_out" },
+        { "labelKey": "item_zoom_reset", "shortcut": "Ctrl+0", "action": "view.zoomReset" },
+        { "type": "separator" },
+        { "labelKey": "item_show_spaces", "action": "view.showSpaces" },
+        { "labelKey": "item_show_tabs", "action": "view.showTabs" },
+        { "labelKey": "item_show_newlines", "action": "view.showNewlines" },
+        { "labelKey": "item_indent_guides", "action": "view.indentGuides" },
+        { "labelKey": "item_tail", "action": "view.tail" },
+        { "type": "separator" },
+        { "labelKey": "item_sync_scroll_v", "action": "view.syncScrollV" },
+        { "labelKey": "item_sync_scroll_h", "action": "view.syncScrollH" },
+        { "type": "separator" },
+        {
+          "labelKey": "menu_fold",
+          "submenu": [
+            { "labelKey": "item_fold", "shortcut": "Ctrl+Shift+[", "action": "fold.fold" },
+            { "labelKey": "item_unfold", "shortcut": "Ctrl+Shift+]", "action": "fold.unfold" },
+            { "type": "separator" },
+            { "labelKey": "item_fold_all", "shortcut": "Ctrl+K Ctrl+0", "action": "fold.all" },
+            { "labelKey": "item_unfold_all", "shortcut": "Ctrl+K Ctrl+J", "action": "fold.unfoldAll" }
+          ]
+        }
+      ]
+    },
+    {
+      "labelKey": "menu_settings",
+      "submenu": [
+        {
+          "labelKey": "menu_language",
+          "icon": "translate",
+          "dynamic": "languages"
+        },
+        {
+          "labelKey": "menu_keymap",
+          "icon": "keyboard",
+          "submenu": [
+            { "labelKey": "item_keymap_default", "action": "keymap.default" },
+            { "labelKey": "item_keymap_vim", "action": "keymap.vim" },
+            { "type": "separator" },
+            { "labelKey": "item_keymap_custom", "action": "keymap.custom" },
+            { "labelKey": "item_keymap_editor", "action": "keymap.editor", "icon": "keyboard" }
+          ]
+        },
+        { "type": "separator" },
+        { "labelKey": "item_font_editor", "action": "font.editor", "icon": "text_fields" },
+        { "labelKey": "item_appearance", "action": "appearance.editor", "icon": "format_size" },
+        { "labelKey": "item_color_editor", "action": "color.editor", "icon": "palette" },
+        { "type": "separator" },
+        { "labelKey": "item_menu_editor", "action": "menu.editor", "icon": "edit" },
+        { "labelKey": "item_toolbar_editor", "action": "toolbar.editor", "icon": "edit" },
+        { "type": "separator" },
+        { "labelKey": "item_file_assoc", "action": "settings.fileAssoc", "icon": "description" },
+        { "labelKey": "item_settings", "action": "settings.open", "icon": "settings" }
+      ]
+    },
+    { "labelKey": "menu_syntax", "dynamic": "syntax" },
+    { "labelKey": "menu_encoding", "dynamic": "encoding" },
+    { "labelKey": "menu_tools", "dynamic": "scripts" },
+    {
+      "labelKey": "menu_run",
+      "submenu": [
+        { "labelKey": "item_run", "shortcut": "Ctrl+F5", "action": "run.prompt", "icon": "terminal" },
+        { "type": "separator" },
+        { "labelKey": "menu_run_saved", "dynamic": "run" },
+        { "labelKey": "item_run_manage", "action": "run.manage" }
+      ]
+    },
+    {
+      "labelKey": "menu_macro",
+      "submenu": [
+        { "labelKey": "item_macro_record", "shortcut": "Ctrl+Shift+R", "action": "macro.record", "icon": "fiber_manual_record" },
+        { "labelKey": "item_macro_play", "shortcut": "Ctrl+Shift+E", "action": "macro.play", "icon": "play_arrow" },
+        { "labelKey": "item_macro_play_times", "action": "macro.playTimes" },
+        { "type": "separator" },
+        { "labelKey": "item_macro_save", "action": "macro.save", "icon": "save" },
+        { "labelKey": "menu_macro_saved", "dynamic": "macros" },
+        { "labelKey": "item_macro_manage", "action": "macro.manage" }
+      ]
+    },
+    {
+      "labelKey": "menu_help",
+      "submenu": [
+        { "labelKey": "item_donate", "action": "help.donate", "icon": "favorite" },
+        { "type": "separator" },
+        { "labelKey": "item_about", "action": "help.about", "icon": "info_outline" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "language": "xml",
+  "extensions": [
+    "xml",
+    "svg",
+    "xsd",
+    "xslt",
+    "xsl",
+    "rng"
+  ]
+}

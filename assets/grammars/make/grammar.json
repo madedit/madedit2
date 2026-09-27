@@ -1,0 +1,12 @@
+{
+  "language": "make",
+  "extensions": [
+    "makefile",
+    "Makefile",
+    "MAKEFILE",
+    "GNUmakefile",
+    "mk",
+    "mak",
+    "dsp"
+  ]
+}

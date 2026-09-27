@@ -1,0 +1,11 @@
+{
+  "language": "zsh",
+  "extensions": [
+    "zsh",
+    "zshrc",
+    "zprofile",
+    "zshenv",
+    "zlogin",
+    "zlogout"
+  ]
+}

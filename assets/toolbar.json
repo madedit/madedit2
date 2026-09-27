@@ -1,0 +1,32 @@
+{
+  "_comment": "Toolbar definition: a flat list of MenuNode items (labelKey for the tooltip, action dispatched like a menu item, icon from the menuIcons whitelist) and separators. External settings/toolbar.json overrides this bundled default; edit via Settings > Toolbar Editor.",
+  "items": [
+    { "labelKey": "item_new", "action": "file.new", "icon": "note_add" },
+    { "labelKey": "item_open", "action": "file.open", "icon": "folder_open" },
+    { "labelKey": "item_save", "action": "file.save", "icon": "save" },
+    { "labelKey": "item_save_as", "action": "file.saveAs", "icon": "save_as" },
+    { "type": "separator" },
+    { "labelKey": "item_undo", "action": "edit.undo", "icon": "undo" },
+    { "labelKey": "item_redo", "action": "edit.redo", "icon": "redo" },
+    { "labelKey": "item_cut", "action": "edit.cut", "icon": "content_cut" },
+    { "labelKey": "item_copy", "action": "edit.copy", "icon": "content_copy" },
+    { "labelKey": "item_paste", "action": "edit.paste", "icon": "content_paste" },
+    { "type": "separator" },
+    { "labelKey": "item_find", "action": "search.find", "icon": "search" },
+    { "labelKey": "item_goto_line", "action": "search.gotoLine", "icon": "tag" },
+    { "labelKey": "item_bookmark_toggle", "action": "bookmark.toggle", "icon": "bookmark_add" },
+    { "type": "separator" },
+    { "labelKey": "menu_wrap", "action": "wrap.toggle", "icon": "wrap_text" },
+    { "labelKey": "item_zoom_in", "action": "view.zoomIn", "icon": "zoom_in" },
+    { "labelKey": "item_zoom_out", "action": "view.zoomOut", "icon": "zoom_out" },
+    { "labelKey": "item_mode_text", "action": "view.mode.text", "icon": "text_fields" },
+    { "labelKey": "item_mode_column", "action": "view.mode.column", "icon": "view_column" },
+    { "labelKey": "item_mode_hex", "action": "view.mode.hex", "icon": "code" },
+    { "type": "separator" },
+    { "labelKey": "item_macro_record", "action": "macro.record", "icon": "fiber_manual_record" },
+    { "labelKey": "item_macro_play", "action": "macro.play", "icon": "play_arrow" },
+    { "labelKey": "item_run", "action": "run.prompt", "icon": "terminal" },
+    { "labelKey": "item_font_editor", "action": "font.editor", "icon": "format_size" },
+    { "labelKey": "item_settings", "action": "settings.open", "icon": "settings" }
+  ]
+}

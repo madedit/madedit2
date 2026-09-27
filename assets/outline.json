@@ -1,0 +1,141 @@
+{
+  "_comment": "Document outline rules (View > Document Outline). One entry per language: 'extensions' select it by file name, 'patterns' are tried per line in order (first match wins). 'regex' uses Dart RegExp syntax; group 'nameGroup' (default 1) is the symbol name. Nesting depth comes from the line's indentation divided by 'indentUnit' (default 4 columns, tab = 4), or from the length of group 'depthFromGroup' (e.g. the #'s of a Markdown heading). 'kind' is one of function, method, class, heading, variable, section, other (icon only). Add 'caseInsensitive': true when needed.",
+  "languages": {
+    "python": {
+      "extensions": ["py", "pyw", "pyi"],
+      "patterns": [
+        { "regex": "^\\s*class\\s+([A-Za-z_]\\w*)", "kind": "class" },
+        { "regex": "^\\s*(?:async\\s+)?def\\s+([A-Za-z_]\\w*)", "kind": "function" }
+      ]
+    },
+    "javascript": {
+      "extensions": ["js", "mjs", "cjs", "jsx", "ts", "tsx", "mts", "cts"],
+      "patterns": [
+        { "regex": "^\\s*(?:export\\s+)?(?:default\\s+)?(?:abstract\\s+)?class\\s+([A-Za-z_$][\\w$]*)", "kind": "class" },
+        { "regex": "^\\s*(?:export\\s+)?(?:default\\s+)?(?:async\\s+)?function\\s*\\*?\\s*([A-Za-z_$][\\w$]*)", "kind": "function" },
+        { "regex": "^\\s*(?:export\\s+)?(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*(?::[^=]*)?=\\s*(?:async\\s*)?(?:\\([^)]*\\)|[A-Za-z_$][\\w$]*)\\s*(?::[^=]*)?=>", "kind": "function" },
+        { "regex": "^\\s*(?:export\\s+)?(?:interface|type|enum)\\s+([A-Za-z_$][\\w$]*)", "kind": "class" },
+        { "regex": "^\\s+(?!(?:if|for|while|switch|catch|return|else|do|new|function|constructor)\\b)(?:public\\s+|private\\s+|protected\\s+|static\\s+|async\\s+|readonly\\s+|get\\s+|set\\s+|override\\s+)*([A-Za-z_$][\\w$]*)\\s*(?:<[^>]*>)?\\s*\\([^)]*\\)\\s*(?::[^{]*)?\\{\\s*$", "kind": "method" }
+      ]
+    },
+    "dart": {
+      "extensions": ["dart"],
+      "patterns": [
+        { "regex": "^\\s*(?:abstract\\s+|base\\s+|final\\s+|sealed\\s+|interface\\s+)*(?:class|mixin|enum|extension|typedef)\\s+([A-Za-z_$][\\w$]*)", "kind": "class" },
+        { "regex": "^\\s*(?!(?:if|for|while|switch|catch|return|else|do|new|await|super|this)\\b)(?:static\\s+)?(?:[A-Za-z_$][\\w$<>?,.\\[\\] ]*\\s+)?(?:get\\s+|set\\s+)?([A-Za-z_$][\\w$]*)\\s*(?:<[^>]*>)?\\s*\\([^;]*?\\)\\s*(?:async\\s*\\*?\\s*|sync\\s*\\*\\s*)?(?:=>|\\{)\\s*$", "kind": "function" }
+      ]
+    },
+    "c": {
+      "extensions": ["c", "h", "cpp", "cc", "cxx", "hpp", "hh", "hxx", "m", "mm", "java", "cs", "kt", "kts", "swift", "scala", "groovy"],
+      "patterns": [
+        { "regex": "^\\s*(?:public\\s+|private\\s+|protected\\s+|internal\\s+|static\\s+|final\\s+|abstract\\s+|sealed\\s+|partial\\s+|open\\s+|data\\s+|template\\s*<[^>]*>\\s*)*(?:class|struct|enum(?:\\s+class)?|interface|union|record|namespace|object|protocol|extension)\\s+([A-Za-z_][\\w:.]*)", "kind": "class" },
+        { "regex": "^\\s*(?!(?:if|for|while|switch|catch|return|else|do|new|delete|sizeof|throw|using|case)\\b)(?:[A-Za-z_][\\w:<>,*&\\[\\]. ]*\\s+)?[*&]*([A-Za-z_]\\w*(?:::~?[A-Za-z_]\\w*)+)\\s*\\([^;]*$", "kind": "function" },
+        { "regex": "^\\s*(?!(?:if|for|while|switch|catch|return|else|do|new|delete|sizeof|throw|using|case)\\b)(?:[A-Za-z_][\\w:<>,*&\\[\\]. ]*\\s+)[*&]*([A-Za-z_]\\w*)\\s*\\([^;]*$", "kind": "function" },
+        { "regex": "^\\s*(?:fun|func)\\s+(?:[\\w<>.]+\\s*\\.\\s*)?([A-Za-z_]\\w*)", "kind": "function" }
+      ]
+    },
+    "go": {
+      "extensions": ["go"],
+      "patterns": [
+        { "regex": "^func\\s+(?:\\([^)]*\\)\\s*)?([A-Za-z_]\\w*)", "kind": "function" },
+        { "regex": "^type\\s+([A-Za-z_]\\w*)", "kind": "class" }
+      ]
+    },
+    "rust": {
+      "extensions": ["rs"],
+      "patterns": [
+        { "regex": "^\\s*(?:pub(?:\\([^)]*\\))?\\s+)?(?:const\\s+)?(?:async\\s+)?(?:unsafe\\s+)?(?:extern\\s+\"[^\"]*\"\\s+)?fn\\s+([A-Za-z_]\\w*)", "kind": "function" },
+        { "regex": "^\\s*(?:pub(?:\\([^)]*\\))?\\s+)?(?:struct|enum|trait|union|mod|type)\\s+([A-Za-z_]\\w*)", "kind": "class" },
+        { "regex": "^\\s*impl(?:<[^>]*>)?\\s+(?:[\\w:<>]+\\s+for\\s+)?([A-Za-z_][\\w:<>]*)", "kind": "class" }
+      ]
+    },
+    "lua": {
+      "extensions": ["lua"],
+      "patterns": [
+        { "regex": "^\\s*(?:local\\s+)?function\\s+([A-Za-z_][\\w.:]*)", "kind": "function" },
+        { "regex": "^\\s*(?:local\\s+)?([A-Za-z_][\\w.]*)\\s*=\\s*function\\b", "kind": "function" }
+      ]
+    },
+    "ruby": {
+      "extensions": ["rb", "rake", "gemspec"],
+      "patterns": [
+        { "regex": "^\\s*(?:class|module)\\s+([A-Z][\\w:]*)", "kind": "class" },
+        { "regex": "^\\s*def\\s+(?:self\\.)?([A-Za-z_]\\w*[?!=]?)", "kind": "function" }
+      ]
+    },
+    "php": {
+      "extensions": ["php", "phtml"],
+      "patterns": [
+        { "regex": "^\\s*(?:abstract\\s+|final\\s+)?(?:class|interface|trait|enum)\\s+([A-Za-z_]\\w*)", "kind": "class" },
+        { "regex": "^\\s*(?:public\\s+|private\\s+|protected\\s+|static\\s+|abstract\\s+|final\\s+)*function\\s+&?([A-Za-z_]\\w*)", "kind": "function" }
+      ]
+    },
+    "perl": {
+      "extensions": ["pl", "pm"],
+      "patterns": [
+        { "regex": "^\\s*package\\s+([\\w:]+)", "kind": "class" },
+        { "regex": "^\\s*sub\\s+([A-Za-z_]\\w*)", "kind": "function" }
+      ]
+    },
+    "shell": {
+      "extensions": ["sh", "bash", "zsh", "ksh"],
+      "patterns": [
+        { "regex": "^\\s*function\\s+([A-Za-z_][\\w-]*)", "kind": "function" },
+        { "regex": "^\\s*([A-Za-z_][\\w-]*)\\s*\\(\\)\\s*\\{?", "kind": "function" }
+      ]
+    },
+    "powershell": {
+      "extensions": ["ps1", "psm1"],
+      "patterns": [
+        { "regex": "^\\s*function\\s+([A-Za-z_][\\w-]*)", "kind": "function", "caseInsensitive": true },
+        { "regex": "^\\s*class\\s+([A-Za-z_]\\w*)", "kind": "class", "caseInsensitive": true }
+      ]
+    },
+    "markdown": {
+      "extensions": ["md", "markdown", "mdx"],
+      "patterns": [
+        { "regex": "^(#{1,6})\\s+(.+?)\\s*#*\\s*$", "kind": "heading", "nameGroup": 2, "depthFromGroup": 1 }
+      ]
+    },
+    "css": {
+      "extensions": ["css", "scss", "less"],
+      "patterns": [
+        { "regex": "^\\s*@(?:media|keyframes|font-face|supports|layer)\\b([^{]*)\\{", "kind": "section" },
+        { "regex": "^\\s*([.#:\\[\\]\\w*>+~,\\s=\"'-]+?)\\s*\\{\\s*$", "kind": "section" }
+      ]
+    },
+    "json": {
+      "extensions": ["json", "jsonc", "json5"],
+      "indentUnit": 2,
+      "patterns": [
+        { "regex": "^\\s*\"([^\"]+)\"\\s*:\\s*[\\[{]", "kind": "section" },
+        { "regex": "^\\s*\"([^\"]+)\"\\s*:", "kind": "variable" }
+      ]
+    },
+    "yaml": {
+      "extensions": ["yml", "yaml"],
+      "indentUnit": 2,
+      "patterns": [
+        { "regex": "^\\s*([A-Za-z_][\\w.\\-]*)\\s*:", "kind": "variable" }
+      ]
+    },
+    "toml": {
+      "extensions": ["toml", "ini", "cfg", "conf", "properties"],
+      "patterns": [
+        { "regex": "^\\s*\\[+([^\\]]+)\\]+", "kind": "section" }
+      ]
+    },
+    "sql": {
+      "extensions": ["sql"],
+      "patterns": [
+        { "regex": "^\\s*create\\s+(?:or\\s+replace\\s+)?(?:temp(?:orary)?\\s+)?(?:table|view|function|procedure|index|trigger|schema|database|type)\\s+(?:if\\s+not\\s+exists\\s+)?([\\w.\"\\[\\]`]+)", "kind": "section", "caseInsensitive": true }
+      ]
+    },
+    "makefile": {
+      "extensions": ["mk", "mak"],
+      "patterns": [
+        { "regex": "^([A-Za-z_][\\w.\\-]*)\\s*:(?!=)", "kind": "other" }
+      ]
+    }
+  }
+}

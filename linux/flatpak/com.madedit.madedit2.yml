@@ -1,0 +1,67 @@
+# Flatpak manifest for madedit2.
+#
+# This does NOT build Flutter/Rust inside the sandbox: zlinux_build.sh runs
+# `flutter build linux --release` on the host first, and this manifest just
+# packages the resulting bundle (build/linux/x64/release/bundle) on top of the
+# freedesktop runtime. The runtime supplies glibc/GTK/libcups, so the same
+# .flatpak runs on any distro that has Flatpak (RHEL 9 with its old glibc
+# included).
+#
+# Build:  flatpak-builder --user --install-deps-from=flathub --force-clean \
+#             --repo=build/flatpak/repo build/flatpak/build linux/flatpak/com.madedit.madedit2.yml
+# Bundle: flatpak build-bundle build/flatpak/repo madedit2.flatpak com.madedit.madedit2
+
+app-id: com.madedit.madedit2
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: madedit2
+
+# flatpak-builder ≤ 1.2 (Ubuntu 22.04) finishes by running `appstream-compose`
+# inside the SDK, which the 24.08 SDK no longer ships (it moved to
+# `appstreamcli compose`) → "bwrap: execvp appstream-compose: No such file".
+# The composed catalog only matters for a repo/Flathub; a .flatpak bundle
+# installs and shows its metainfo fine without it.
+appstream-compose: false
+
+finish-args:
+  # X11 (window_manager's raise/always-on-top/geometry calls are X11-only; under
+  # a pure Wayland socket GTK would pick the Wayland backend and they no-op).
+  - --socket=x11
+  - --share=ipc
+  - --device=dri
+  # A large-file editor must open arbitrary paths ("flatpak run … /any/file").
+  - --filesystem=host
+  # Single-instance: a second `flatpak run` forwards its file paths over a
+  # loopback socket to the first. Each run is its own sandbox; without the
+  # shared network namespace the two never see each other's loopback.
+  - --share=network
+  # Printing (the `printing` plugin talks to CUPS).
+  - --socket=cups
+  # Open external links (donate page) through the portal.
+  - --talk-name=org.freedesktop.portal.Desktop
+
+modules:
+  - name: madedit2
+    buildsystem: simple
+    build-commands:
+      # The whole Flutter bundle stays together: the executable locates
+      # data/flutter_assets and lib/ relative to its own path.
+      - mkdir -p /app/madedit2 && cp -r bundle/. /app/madedit2/
+      - mkdir -p /app/bin && ln -s /app/madedit2/madedit2 /app/bin/madedit2
+      # Flatpak only exports desktop entries / icons named after the app id.
+      - "sed -e 's/^Icon=madedit2$/Icon=com.madedit.madedit2/' madedit2.desktop > com.madedit.madedit2.desktop"
+      - install -Dm644 com.madedit.madedit2.desktop /app/share/applications/com.madedit.madedit2.desktop
+      - 'for d in icons/hicolor/*/apps; do size=$(basename "$(dirname "$d")"); for f in "$d"/madedit2.*; do install -Dm644 "$f" "/app/share/icons/hicolor/$size/apps/com.madedit.madedit2.${f##*.}"; done; done'
+      - install -Dm644 com.madedit.madedit2.metainfo.xml /app/share/metainfo/com.madedit.madedit2.metainfo.xml
+    sources:
+      - type: dir
+        path: ../../build/linux/x64/release/bundle
+        dest: bundle
+      - type: file
+        path: ../madedit2.desktop
+      - type: dir
+        path: ../icons
+        dest: icons
+      - type: file
+        path: com.madedit.madedit2.metainfo.xml

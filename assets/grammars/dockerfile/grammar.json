@@ -1,0 +1,10 @@
+{
+  "language": "dockerfile",
+  "extensions": [
+    "Dockerfile",
+    "dockerfile",
+    "docker",
+    "Containerfile",
+    "container"
+  ]
+}

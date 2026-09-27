@@ -1,0 +1,6 @@
+{
+  "language": "nginx",
+  "extensions": [
+    "nginx"
+  ]
+}

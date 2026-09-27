@@ -1,0 +1,6 @@
+{
+  "language": "asciidoc_inline",
+  "extensions": [
+    "asciidoc_inline"
+  ]
+}

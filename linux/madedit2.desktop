@@ -1,0 +1,17 @@
+# Desktop entry template for Linux packaging (deb/AppImage/flatpak).
+# Packaging installs this to /usr/share/applications/ and the icons from
+# linux/icons/hicolor/ to /usr/share/icons/hicolor/ (then the desktop shell
+# picks up the window/launcher icon by Icon= name matching the app id).
+# MimeType lists every standard type from file_assoc_linux.dart's table so a
+# Flatpak (where the in-app association dialog cannot reach the host) still
+# shows up under "Open With" for the usual text/code files.
+[Desktop Entry]
+Name=MadEdit 2
+Comment=Large-file text/hex editor
+Exec=madedit2 %F
+Icon=madedit2
+Terminal=false
+Type=Application
+Categories=Utility;TextEditor;Development;
+MimeType=text/plain;text/markdown;text/csv;text/tab-separated-values;text/x-log;text/html;text/css;text/javascript;text/x-typescript;application/json;application/xml;application/yaml;application/toml;application/sql;text/x-python;text/x-csrc;text/x-chdr;text/x-c++src;text/x-c++hdr;text/x-csharp;text/x-java;text/x-go;text/rust;text/x-lua;text/x-ruby;application/x-php;application/x-shellscript;application/x-bat;application/x-powershell;application/vnd.dart;
+StartupWMClass=madedit2
