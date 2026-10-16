@@ -132,6 +132,7 @@ class MenuNode {
     'keyboard_return': Icons.keyboard_return,
     'bookmark_add': Icons.bookmark_add_outlined,
     'calculate': Icons.calculate_outlined,
+    'fingerprint': Icons.fingerprint,
     'zoom_in': Icons.zoom_in,
     'zoom_out': Icons.zoom_out,
   };

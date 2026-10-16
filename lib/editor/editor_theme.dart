@@ -11,8 +11,15 @@ import '../settings/app_settings.dart';
 import '../util/log.dart';
 import 'tab_expand.dart';
 
-double get editorFontSize => AppSettings.instance.zoomedFontSize;
-double get editorLineHeight => AppSettings.instance.zoomedLineHeight;
+/// Font size / row height at quick-zoom factor [zoom]. Zoom is per tab (the
+/// text and hex views pass their pane's factor); the diff / merge views use
+/// the plain getters below, i.e. the font dialog's size.
+double editorFontSizeAt(double zoom) => AppSettings.instance.fontSize * zoom;
+double editorLineHeightAt(double zoom) =>
+    AppSettings.instance.lineHeight * zoom;
+
+double get editorFontSize => editorFontSizeAt(1);
+double get editorLineHeight => editorLineHeightAt(1);
 
 Color get editorBg => Color(AppSettings.instance.bgArgb);
 Color get editorFg => Color(AppSettings.instance.fgArgb);
@@ -48,10 +55,12 @@ ui.Paragraph buildMonoParagraph(
   List<(String, Color)> runs, {
   double maxWidth = editorLayoutMaxW,
   bool singleLine = true,
+  double zoom = 1,
 }) {
+  final fontSize = editorFontSizeAt(zoom);
   final pb = ui.ParagraphBuilder(
     ui.ParagraphStyle(
-      fontSize: editorFontSize,
+      fontSize: fontSize,
       fontFamily: editorMonoFont,
       maxLines: singleLine ? 1 : null,
       ellipsis: singleLine ? '' : null,
@@ -62,7 +71,7 @@ ui.Paragraph buildMonoParagraph(
     pb.pushStyle(
       ui.TextStyle(
         color: color,
-        fontSize: editorFontSize,
+        fontSize: fontSize,
         fontFamily: editorMonoFont,
       ),
     );
@@ -73,24 +82,30 @@ ui.Paragraph buildMonoParagraph(
 }
 
 /// Width of one character in the editor's monospace font (all glyphs are the same width).
-double get editorCharWidth {
-  final key = '$editorMonoFont/$editorFontSize';
-  if (key != _charWidthKey) {
-    _charWidthKey = key;
-    // First layout in a new family/size: this is where the engine resolves
-    // the system font. Logged when slow (a freeze after a font change has
-    // been reported; a slow resolve here would explain it).
-    final sw = Stopwatch()..start();
-    final p = buildMonoParagraph([('0' * 16, editorFg)]);
-    _charWidth = p.maxIntrinsicWidth / 16;
-    if (sw.elapsedMilliseconds >= 200) {
-      Log.instance.w(
-        'slow: first layout of font "$editorMonoFont" $editorFontSize took '
-        '${sw.elapsedMilliseconds} ms',
-      );
-    }
+double get editorCharWidth => editorCharWidthAt(1);
+
+/// [editorCharWidth] at quick-zoom factor [zoom]. Cached per family/size:
+/// tabs at different zoom levels repaint in turn, and a single-slot cache
+/// would re-measure on every switch.
+double editorCharWidthAt(double zoom) {
+  final size = editorFontSizeAt(zoom);
+  final key = '$editorMonoFont/$size';
+  final hit = _charWidths[key];
+  if (hit != null) return hit;
+  // First layout in a new family/size: this is where the engine resolves
+  // the system font. Logged when slow (a freeze after a font change has
+  // been reported; a slow resolve here would explain it).
+  final sw = Stopwatch()..start();
+  final p = buildMonoParagraph([('0' * 16, editorFg)], zoom: zoom);
+  final w = p.maxIntrinsicWidth / 16;
+  if (sw.elapsedMilliseconds >= 200) {
+    Log.instance.w(
+      'slow: first layout of font "$editorMonoFont" $size took '
+      '${sw.elapsedMilliseconds} ms',
+    );
   }
-  return _charWidth;
+  if (_charWidths.length > 64) _charWidths.clear(); // font / size churn
+  return _charWidths[key] = w;
 }
 
 /// Lets the text engine wrap at [width] and returns the wrap points (UTF-16
@@ -99,7 +114,11 @@ double get editorCharWidth {
 /// Unlike "by character count", this is a **real measurement**: double-width
 /// characters (CJK etc.) and word-boundary breaking are all accounted for,
 /// so every row truly fits inside the viewport.
-List<int> measuredWrapBoundaries(String line, double width) {
+List<int> measuredWrapBoundaries(
+  String line,
+  double width, {
+  double zoom = 1,
+}) {
   if (width <= 8 || line.isEmpty) return [0, line.length];
   // Lay out the tab-expanded text (that is what gets painted) and map the
   // cut points back to the line's own indices; a cut inside a tab's spaces
@@ -110,6 +129,7 @@ List<int> measuredWrapBoundaries(String line, double width) {
     [(shown, editorFg)],
     maxWidth: width,
     singleLine: false,
+    zoom: zoom,
   );
   final out = <int>[0];
   var pos = 0;
@@ -126,5 +146,4 @@ List<int> measuredWrapBoundaries(String line, double width) {
   return out;
 }
 
-String _charWidthKey = '';
-double _charWidth = 8;
+final Map<String, double> _charWidths = {};

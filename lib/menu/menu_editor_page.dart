@@ -68,6 +68,34 @@ Future<bool> showToolbarEditorDialog(
     ) ??
     false;
 
+/// Same editor again, for the editor's right-click menu
+/// (`settings/context_menu.json`, `items` root, flat like the toolbar).
+/// [menuSource] feeds the "unused" area exactly as for the toolbar; the
+/// caller adds the context-only items (ctx.delete) the main menu lacks.
+Future<bool> showContextMenuEditorDialog(
+  BuildContext context, {
+  required List<MenuNode> draft,
+  required VoidCallback onChanged,
+  required List<MenuNode> menuSource,
+}) async =>
+    await showDialog<bool>(
+      context: context,
+      barrierColor: Colors.black26,
+      builder: (_) => MenuEditorDialog(
+        draft: draft,
+        trash: <MenuNode>[],
+        onChanged: onChanged,
+        titleKey: 'cm_title',
+        saveRel: 'context_menu.json',
+        defaultAsset: 'assets/context_menu.json',
+        rootKey: 'items',
+        allowRootSeparator: true,
+        unusedSource: menuSource,
+        unusedHeaderKey: 'me_unused_header_ctx',
+      ),
+    ) ??
+    false;
+
 class MenuEditorDialog extends StatefulWidget {
   const MenuEditorDialog({
     super.key,
@@ -80,6 +108,7 @@ class MenuEditorDialog extends StatefulWidget {
     this.rootKey = 'menus',
     this.allowRootSeparator = false,
     this.unusedSource,
+    this.unusedHeaderKey = 'me_unused_header',
   });
 
   final List<MenuNode> draft;
@@ -109,6 +138,9 @@ class MenuEditorDialog extends StatefulWidget {
   /// nodes excluded) that are not in [draft]/[trash]/clipboard yet. Derived,
   /// never persisted — used by the toolbar editor with the main-menu tree.
   final List<MenuNode>? unusedSource;
+
+  /// l10n key of the "unused" area header (it names what the list is for).
+  final String unusedHeaderKey;
 
   @override
   State<MenuEditorDialog> createState() => _MenuEditorDialogState();
@@ -471,7 +503,7 @@ class _MenuEditorDialogState extends State<MenuEditorDialog> {
                         Padding(
                           padding: const EdgeInsets.only(left: 12, bottom: 4),
                           child: Text(
-                            l10n.tr('me_unused_header'),
+                            l10n.tr(widget.unusedHeaderKey),
                             style: Theme.of(context).textTheme.bodySmall,
                           ),
                         ),

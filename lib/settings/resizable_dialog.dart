@@ -7,8 +7,8 @@
 // Two kinds of dialog:
 //   - fixed height ([initialHeight] given): width and height both resize
 //     and both are remembered;
-//   - content-sized height ([initialHeight] null — the advanced settings,
-//     run, print… dialogs): the height follows the content until the user
+//   - content-sized height ([initialHeight] null — the run, print… dialogs):
+//     the height follows the content until the user
 //     drags it, and can then only be made TALLER than the content (a
 //     shorter box would overflow, as such content is not scrollable by
 //     contract). Only the width is remembered: the content's natural height

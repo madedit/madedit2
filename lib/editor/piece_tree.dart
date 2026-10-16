@@ -296,6 +296,30 @@ class PieceTree {
     }
   }
 
+  /// Re-derive every piece's newline count with a different counting rule:
+  /// [count] is called with each piece's (buffer, bufStart, len) in document
+  /// order and returns its new lf. The subLF aggregates are rebuilt afterwards;
+  /// the byte structure is unchanged. Used when the document's codec makes a
+  /// different byte sequence count as a newline (e.g. UTF-16 <-> UTF-8).
+  void recomputeLf(int Function(int buffer, int bufStart, int len) count) {
+    void assign(_Node? n) {
+      if (n == null) return;
+      assign(n.left);
+      n.lf = count(n.buffer, n.start, n.length);
+      assign(n.right);
+    }
+
+    void rebuild(_Node? n) {
+      if (n == null) return;
+      rebuild(n.left);
+      rebuild(n.right);
+      _pull(n); // post-order: children are up to date before the parent
+    }
+
+    assign(_root);
+    rebuild(_root);
+  }
+
   /// Insert a piece at boundary [offset] (call [splitAt] first to ensure the boundary).
   void insertPieceAt(int offset, int buffer, int start, int length, int lf) {
     final fresh = _Node(buffer, start, length, lf);

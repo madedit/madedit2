@@ -173,10 +173,16 @@ class SessionFile {
     this.bookmark,
     this.bookmarks = const [],
     this.wrap,
+    this.zoom = 1.0,
+    this.untitled = false,
   });
 
   final int id;
   final String path;
+
+  /// True when [path] is not a real file but a stashed untitled buffer
+  /// (`settings/untitled/...`): the pane comes back untitled and modified.
+  final bool untitled;
   final int caret;
   final int anchor;
   final String? encoding;
@@ -184,6 +190,9 @@ class SessionFile {
   /// Per-tab soft-wrap override ('off' / 'columns' / 'window'); null = the
   /// tab follows the global default [AppSettings.softWrapMode].
   final String? wrap;
+
+  /// Per-tab quick-zoom factor (1.0 = the font dialog's size).
+  final double zoom;
 
   /// macOS security-scoped bookmark (sandbox re-authorization) — unrelated
   /// to the editor's line [bookmarks] below.
@@ -204,6 +213,8 @@ class SessionFile {
     bookmark: bookmark,
     bookmarks: bookmarks,
     wrap: wrap,
+    zoom: zoom,
+    untitled: untitled,
   );
 
   Map<String, Object?> toJson() => {
@@ -215,6 +226,8 @@ class SessionFile {
     if (bookmark != null) 'bookmark': bookmark,
     if (bookmarks.isNotEmpty) 'bookmarks': bookmarks,
     if (wrap != null) 'wrap': wrap,
+    if (zoom != 1.0) 'zoom': zoom,
+    if (untitled) 'untitled': true,
   };
 
   /// Null when [v] has no usable path.
@@ -239,6 +252,13 @@ class SessionFile {
       wrap: AppSettings.softWrapModeChoices.contains(v['wrap'])
           ? v['wrap'] as String
           : null,
+      zoom: _double(
+        v['zoom'],
+        1.0,
+        AppSettings.fontZoomMin,
+        AppSettings.fontZoomMax,
+      ),
+      untitled: v['untitled'] == true,
     );
   }
 }
@@ -297,21 +317,27 @@ class AppSettings {
   /// Row height in logical pixels (the editor renders with the zoomed one).
   double get lineHeight => fontSize * lineHeightPercent / 100;
 
-  /// Quick-zoom factor layered on top of [fontSize]/[lineHeight] (ctrl+wheel,
-  /// ctrl+=/-, ctrl+0 resets). Kept apart from the base font values so the
-  /// font dialog keeps editing the base and "reset zoom" has a meaning.
-  double fontZoom = 1.0;
+  /// Quick zoom (ctrl+wheel, ctrl+=/-, ctrl+0 resets) is per tab: each pane
+  /// keeps a factor layered on top of [fontSize]/[lineHeight] (persisted in
+  /// [SessionFile.zoom]), so the font dialog's size is the default every
+  /// tab starts at and "reset zoom" returns to.
   static const double fontZoomMin = 0.3;
   static const double fontZoomMax = 5.0;
   static const double fontZoomStep = 0.1;
 
-  /// Effective (zoomed) font size / line height the editor renders with.
+  /// The zoom factor after [steps] presses / wheel notches from [current]
+  /// (±1 each, `0` resets to 100%), clamped; rounded to two decimals so
+  /// repeated steps don't drift.
+  static double stepZoom(double current, int steps) {
+    final target = steps == 0
+        ? 1.0
+        : ((current + steps * fontZoomStep) * 100).round() / 100;
+    return target.clamp(fontZoomMin, fontZoomMax).toDouble();
+  }
+
   /// Row height of menu / popup items (Material default 48 is too tall for
   /// a desktop editor); scales with the UI text scale.
   double get menuRowHeight => 28 * uiScale;
-
-  double get zoomedFontSize => fontSize * fontZoom;
-  double get zoomedLineHeight => lineHeight * fontZoom;
 
   /// Soft-wrap mode in text mode: 'off' = no wrapping, 'columns' = by
   /// character count, 'window' = by window width. Wrapping only affects the
@@ -360,6 +386,15 @@ class AppSettings {
   int undoMaxSteps = 1000;
   static const int undoMaxStepsMin = 10, undoMaxStepsMax = 100000;
 
+  // ── Save behavior (Settings → Advanced…) ────────────────────────────────────
+  /// Strip spaces/tabs at line ends while streaming the file out. The buffer
+  /// keeps them (undo restores them); a nearer .editorconfig wins per file.
+  bool saveTrimTrailingWhitespace = false;
+
+  /// Append the file's line ending to the last line when it has none (an
+  /// empty file stays empty). A nearer .editorconfig wins per file.
+  bool saveEnsureFinalNewline = false;
+
   // ── Auto save / backup (Settings → Advanced…) ───────────────────────────────
   static const List<String> autoSaveChoices = [
     'off',
@@ -380,6 +415,12 @@ class AppSettings {
   /// Where backups go: '' = `<file>.bak` beside the file, otherwise
   /// `<dir>/<name>.<timestamp>.bak`.
   String backupDir = '';
+
+  /// Untitled buffers up to this size are re-stashed as they are typed, so a
+  /// killed process does not lose the tab. Bigger ones are only written on
+  /// tab/layout changes and at close. 0 = never re-stash while typing.
+  int autoStashMaxMB = 32;
+  static const int autoStashMaxMBMin = 0, autoStashMaxMBMax = 4096;
 
   static const List<String> softWrapModeChoices = ['off', 'columns', 'window'];
 
@@ -550,6 +591,7 @@ class AppSettings {
   // ── Derived (what the editor actually uses) ─────────────────────────────────
   int get wholeFileHlMaxBytes => wholeFileHlMaxMB << 20;
   int get autoIndexMaxBytes => autoIndexMaxMB << 20;
+  int get autoStashMaxBytes => autoStashMaxMB << 20;
   int get encodingSampleBytes => encodingSampleKB << 10;
 
   static const List<String> themeModeChoices = ['dark', 'light', 'system'];
@@ -615,25 +657,9 @@ class AppSettings {
     if (changed) _notify();
   }
 
-  /// Step the quick-zoom factor by [steps] (±1 per key press / wheel notch);
-  /// `steps == 0` resets to 100%. Notifies immediately and persists with a
-  /// short debounce (a wheel burst would otherwise overlap writes to
-  /// settings.json). Returns true when the value actually changed.
-  bool zoomFont(int steps) {
-    final target = steps == 0
-        ? 1.0
-        : ((fontZoom + steps * fontZoomStep) * 100).round() / 100;
-    final next = target.clamp(fontZoomMin, fontZoomMax).toDouble();
-    if (next == fontZoom) return false;
-    fontZoom = next;
-    _notify();
-    saveSoon();
-    return true;
-  }
-
   Timer? _saveTimer;
 
-  /// Debounced [save] for high-frequency changes (zoom); trailing edge only.
+  /// Debounced [save] for high-frequency changes (dialog sizes); trailing edge only.
   void saveSoon({Duration delay = const Duration(milliseconds: 400)}) {
     _saveTimer?.cancel();
     _saveTimer = Timer(delay, () {
@@ -680,7 +706,6 @@ class AppSettings {
     fontFamily = o.fontFamily;
     fontSize = o.fontSize;
     lineHeightPercent = o.lineHeightPercent;
-    fontZoom = o.fontZoom;
     softWrapMode = o.softWrapMode;
     softWrapColumns = o.softWrapColumns;
     tabSize = o.tabSize;
@@ -692,10 +717,13 @@ class AppSettings {
     autoHexBinary = o.autoHexBinary;
     autoCompleteMinChars = o.autoCompleteMinChars;
     undoMaxSteps = o.undoMaxSteps;
+    saveTrimTrailingWhitespace = o.saveTrimTrailingWhitespace;
+    saveEnsureFinalNewline = o.saveEnsureFinalNewline;
     autoSave = o.autoSave;
     autoSaveDelaySec = o.autoSaveDelaySec;
     backupOnSave = o.backupOnSave;
     backupDir = o.backupDir;
+    autoStashMaxMB = o.autoStashMaxMB;
     themeMode = o.themeMode;
     uiScale = o.uiScale;
     showSpaces = o.showSpaces;
@@ -811,7 +839,6 @@ class AppSettings {
       'family': fontFamily,
       'size': fontSize,
       'lineHeightPercent': lineHeightPercent,
-      'zoom': fontZoom,
       'softWrapMode': softWrapMode,
       'softWrapColumns': softWrapColumns,
     },
@@ -834,11 +861,16 @@ class AppSettings {
       'autoCompleteMinChars': autoCompleteMinChars,
       'undoMaxSteps': undoMaxSteps,
     },
+    'save': {
+      'trimTrailingWhitespace': saveTrimTrailingWhitespace,
+      'ensureFinalNewline': saveEnsureFinalNewline,
+    },
     'backup': {
       'autoSave': autoSave,
       'autoSaveDelaySec': autoSaveDelaySec,
       'backupOnSave': backupOnSave,
       'backupDir': backupDir,
+      'autoStashMaxMB': autoStashMaxMB,
     },
     'themes': {'dark': dark.toJson(), 'light': light.toJson()},
     'startup': {'keymap': keymap, 'locale': locale, 'logToFile': logToFile},
@@ -922,7 +954,6 @@ class AppSettings {
     } else {
       lineHeightPercent = d.lineHeightPercent;
     }
-    fontZoom = _double(font['zoom'], d.fontZoom, fontZoomMin, fontZoomMax);
     softWrapColumns = _int(
       font['softWrapColumns'],
       d.softWrapColumns,
@@ -996,6 +1027,14 @@ class AppSettings {
       undoMaxStepsMax,
     );
 
+    final save = _section(map['save']);
+    saveTrimTrailingWhitespace = save['trimTrailingWhitespace'] is bool
+        ? save['trimTrailingWhitespace'] as bool
+        : d.saveTrimTrailingWhitespace;
+    saveEnsureFinalNewline = save['ensureFinalNewline'] is bool
+        ? save['ensureFinalNewline'] as bool
+        : d.saveEnsureFinalNewline;
+
     final backup = _section(map['backup']);
     autoSave = autoSaveChoices.contains(backup['autoSave'])
         ? backup['autoSave'] as String
@@ -1012,6 +1051,12 @@ class AppSettings {
     backupDir = backup['backupDir'] is String
         ? backup['backupDir'] as String
         : d.backupDir;
+    autoStashMaxMB = _int(
+      backup['autoStashMaxMB'],
+      d.autoStashMaxMB,
+      autoStashMaxMBMin,
+      autoStashMaxMBMax,
+    );
     final themes = _section(map['themes']);
     dark = ThemeColors.dark()
       ..applyJson(_section(themes['dark']), ThemeColors.dark());

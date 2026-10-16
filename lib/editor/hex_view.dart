@@ -14,6 +14,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 
 import 'editor_theme.dart';
+import 'editor_theme.dart' as editor_theme show buildMonoParagraph;
 
 /// Bytes per row (fixed, like every other hex editor).
 const int hexBytesPerRow = 16;
@@ -153,7 +154,11 @@ class HexViewport extends LeafRenderObjectWidget {
     required this.settingsEpoch,
     this.textCells,
     this.composing = '',
+    this.zoom = 1,
   });
+
+  /// The pane's quick-zoom factor (font size / row height multiplier).
+  final double zoom;
 
   /// The visible bytes, starting at [base] (a multiple of [hexBytesPerRow]).
   final Uint8List bytes;
@@ -204,6 +209,7 @@ class HexViewport extends LeafRenderObjectWidget {
         settingsEpoch: settingsEpoch,
         textCells: textCells,
         composing: composing,
+        zoom: zoom,
       );
 
   @override
@@ -223,7 +229,8 @@ class HexViewport extends LeafRenderObjectWidget {
       ..scrollX = scrollX
       ..settingsEpoch = settingsEpoch
       ..textCells = textCells
-      ..composing = composing;
+      ..composing = composing
+      ..zoom = zoom;
   }
 }
 
@@ -244,9 +251,26 @@ class RenderHexViewport extends RenderBox {
     required this._settingsEpoch,
     List<String>? textCells,
     String composing = '',
+    double zoom = 1,
   }) : _caretFocused = caretFocused, // ignore: prefer_initializing_formals
        _textCells = textCells, // ignore: prefer_initializing_formals
-       _composing = composing; // ignore: prefer_initializing_formals
+       _composing = composing, // ignore: prefer_initializing_formals
+       _zoom = zoom; // ignore: prefer_initializing_formals
+
+  // The pane's quick-zoom factor; the members below shadow the top-level
+  // metric getters / paragraph builder with it applied.
+  double _zoom;
+  set zoom(double v) {
+    if (v == _zoom) return;
+    _zoom = v;
+    _cellCache.clear();
+    markNeedsPaint();
+  }
+
+  double get editorLineHeight => editorLineHeightAt(_zoom);
+  double get editorCharWidth => editorCharWidthAt(_zoom);
+  ui.Paragraph buildMonoParagraph(List<(String, Color)> runs) =>
+      editor_theme.buildMonoParagraph(runs, zoom: _zoom);
 
   String _composing;
   set composing(String v) {

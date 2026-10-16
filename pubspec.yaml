@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.1+2
+version: 1.0.2+3
 
 environment:
   sdk: ^3.12.0
@@ -73,6 +73,7 @@ dependencies:
   # Grapheme-cluster stepping in Document.charLeft/charRight (a letter with
   # its combining marks, an emoji ZWJ sequence… is one Backspace / arrow).
   characters: ^1.4.1
+  crypto: ^3.0.7
 
 # App icon (assets/icons/madedit2.svg is the source of truth; the PNGs are
 # renders of it — madedit2.png full-bleed square, madedit2_android.svg/.png
@@ -135,6 +136,8 @@ flutter:
     - assets/outline.json
     # toolbar definition (seeded to settings/toolbar.json)
     - assets/toolbar.json
+    # editor right-click menu (read from the bundle until the user saves settings/context_menu.json)
+    - assets/context_menu.json
     # example user script (seeded to settings/scripts/)
     - assets/scripts/
     # app icon shown in the About dialog (render of madedit2.svg)

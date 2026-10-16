@@ -6,7 +6,7 @@ import 'dart:io';
 ///   - Letters are always lower-case; an upper-case letter (e.g. `G`) is
 ///     treated as `shift` + lower-case.
 ///   - Named keys are lower-case: escape / enter / space / tab / backspace /
-///     delete / up / down / left / right / home / end / pageup / pagedown /
+///     delete / insert / up / down / left / right / home / end / pageup / pagedown /
 ///     f1..f12.
 ///   - Digits and symbols (`:` `/` `$` …) are used verbatim as the base key.
 class KeyChord {
@@ -85,6 +85,7 @@ String chordLabel(KeyChord c, {bool? mac}) {
       'tab': '⇥',
       'backspace': '⌫',
       'delete': '⌦',
+      'insert': 'Ins',
       'up': '↑',
       'down': '↓',
       'left': '←',
@@ -115,6 +116,7 @@ String chordLabel(KeyChord c, {bool? mac}) {
     'tab': 'Tab',
     'backspace': 'Backspace',
     'delete': 'Delete',
+    'insert': 'Insert',
     'up': 'Up',
     'down': 'Down',
     'left': 'Left',

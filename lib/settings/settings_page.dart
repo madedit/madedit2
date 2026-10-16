@@ -6,6 +6,7 @@
 // startup.
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
 import '../l10n/app_localizations.dart';
@@ -37,7 +38,63 @@ class _SettingsDialogState extends State<SettingsDialog> {
 
   bool _restartHint = false; // logToFile only takes effect on restart
 
+  // Section anchors for the pinned top nav bar: one GlobalKey per section
+  // header, in the same order as the headers appear in the scroll body.
+  static const List<String> _sectionIds = [
+    'set_sec_perf',
+    'set_sec_editing',
+    'set_sec_save',
+    'set_sec_backup',
+    'set_sec_startup',
+  ];
+  final List<GlobalKey> _sectionKeys = [
+    for (var i = 0; i < _sectionIds.length; i++) GlobalKey(),
+  ];
+  final ScrollController _scroll = ScrollController();
+  int _active = 0; // index of the section currently pinned at the top
+
   AppLocalizations get _l10n => AppLocalizations.of(context);
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_updateActive);
+  }
+
+  @override
+  void dispose() {
+    _scroll.removeListener(_updateActive);
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  // Highlight the nav chip for the last section whose top has scrolled to or
+  // past the top of the viewport.
+  void _updateActive() {
+    if (!_scroll.hasClients) return;
+    final pixels = _scroll.position.pixels;
+    var idx = 0;
+    for (var i = 0; i < _sectionKeys.length; i++) {
+      final ro = _sectionKeys[i].currentContext?.findRenderObject();
+      if (ro is! RenderBox || !ro.hasSize) continue;
+      final reveal = RenderAbstractViewport.of(
+        ro,
+      ).getOffsetToReveal(ro, 0.0).offset;
+      if (reveal <= pixels + 1) idx = i;
+    }
+    if (idx != _active) setState(() => _active = idx);
+  }
+
+  void _jumpTo(int index) {
+    final ctx = _sectionKeys[index].currentContext;
+    if (ctx == null) return;
+    Scrollable.ensureVisible(
+      ctx,
+      alignment: 0.0,
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOutCubic,
+    );
+  }
 
   Future<void> _apply() async {
     if (!(_form.currentState?.validate() ?? false)) return;
@@ -60,195 +117,237 @@ class _SettingsDialogState extends State<SettingsDialog> {
       content: ResizableDialogBox(
         id: 'settings',
         initialWidth: 560,
+        initialHeight: 520,
         child: Form(
           key: _form,
-          child: SingleChildScrollView(
-            child: Column(
-              key: _fieldsKey,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Text(
-                  _l10n.trf('set_stored_at', [AppSettings.filePath]),
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-                const SizedBox(height: 12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _navBar(),
+              Expanded(
+                child: SingleChildScrollView(
+                  child: Column(
+                    key: _fieldsKey,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(
+                        _l10n.trf('set_stored_at', [AppSettings.filePath]),
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                      const SizedBox(height: 12),
 
-                _section(_l10n.tr('set_sec_perf')),
-                _intField(
-                  label: _l10n.tr('set_hl_max'),
-                  help: _l10n.tr('set_hl_max_help'),
-                  value: _draft.wholeFileHlMaxMB,
-                  min: 0,
-                  max: 512,
-                  onSaved: (v) => _draft.wholeFileHlMaxMB = v,
-                ),
-                _intField(
-                  label: _l10n.tr('set_hl_debounce'),
-                  help: _l10n.tr('set_hl_debounce_help'),
-                  value: _draft.wholeFileHlDebounceMs,
-                  min: 0,
-                  max: 10000,
-                  onSaved: (v) => _draft.wholeFileHlDebounceMs = v,
-                ),
-                _intField(
-                  label: _l10n.tr('set_index_max'),
-                  help: _l10n.tr('set_index_max_help'),
-                  value: _draft.autoIndexMaxMB,
-                  min: 0,
-                  max: 1 << 20,
-                  onSaved: (v) => _draft.autoIndexMaxMB = v,
-                ),
-                _intField(
-                  label: _l10n.tr('set_enc_sample'),
-                  help: _l10n.tr('set_enc_sample_help'),
-                  value: _draft.encodingSampleKB,
-                  min: 1,
-                  max: 8 << 10,
-                  onSaved: (v) => _draft.encodingSampleKB = v,
-                ),
-                _intField(
-                  label: _l10n.tr('set_script_max'),
-                  help: _l10n.tr('set_script_max_help'),
-                  value: _draft.scriptWholeFileMaxMB,
-                  min: 0,
-                  max: 2048,
-                  onSaved: (v) => _draft.scriptWholeFileMaxMB = v,
-                ),
+                      _section(0, _l10n.tr('set_sec_perf')),
+                      _intField(
+                        label: _l10n.tr('set_hl_max'),
+                        help: _l10n.tr('set_hl_max_help'),
+                        value: _draft.wholeFileHlMaxMB,
+                        min: 0,
+                        max: 512,
+                        onSaved: (v) => _draft.wholeFileHlMaxMB = v,
+                      ),
+                      _intField(
+                        label: _l10n.tr('set_hl_debounce'),
+                        help: _l10n.tr('set_hl_debounce_help'),
+                        value: _draft.wholeFileHlDebounceMs,
+                        min: 0,
+                        max: 10000,
+                        onSaved: (v) => _draft.wholeFileHlDebounceMs = v,
+                      ),
+                      _intField(
+                        label: _l10n.tr('set_index_max'),
+                        help: _l10n.tr('set_index_max_help'),
+                        value: _draft.autoIndexMaxMB,
+                        min: 0,
+                        max: 1 << 20,
+                        onSaved: (v) => _draft.autoIndexMaxMB = v,
+                      ),
+                      _intField(
+                        label: _l10n.tr('set_enc_sample'),
+                        help: _l10n.tr('set_enc_sample_help'),
+                        value: _draft.encodingSampleKB,
+                        min: 1,
+                        max: 8 << 10,
+                        onSaved: (v) => _draft.encodingSampleKB = v,
+                      ),
+                      _intField(
+                        label: _l10n.tr('set_script_max'),
+                        help: _l10n.tr('set_script_max_help'),
+                        value: _draft.scriptWholeFileMaxMB,
+                        min: 0,
+                        max: 2048,
+                        onSaved: (v) => _draft.scriptWholeFileMaxMB = v,
+                      ),
 
-                // Font (family/size/line height/columns) moved to the font
-                // dialog (View → Font Settings…), appearance to the color editor
-                // (View → Color Editor…).
-                _section(_l10n.tr('set_sec_editing')),
-                _intField(
-                  label: _l10n.tr('set_tab_size'),
-                  help: _l10n.tr('set_tab_size_help'),
-                  value: _draft.tabSize,
-                  min: AppSettings.tabSizeMin,
-                  max: AppSettings.tabSizeMax,
-                  onSaved: (v) => _draft.tabSize = v,
-                ),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(_l10n.tr('set_insert_spaces')),
-                  subtitle: Text(_l10n.tr('set_insert_spaces_help')),
-                  value: _draft.insertSpaces,
-                  onChanged: (v) => setState(() => _draft.insertSpaces = v),
-                ),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(_l10n.tr('set_auto_indent')),
-                  subtitle: Text(_l10n.tr('set_auto_indent_help')),
-                  value: _draft.autoIndent,
-                  onChanged: (v) => setState(() => _draft.autoIndent = v),
-                ),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(_l10n.tr('set_auto_close')),
-                  subtitle: Text(_l10n.tr('set_auto_close_help')),
-                  value: _draft.autoCloseBrackets,
-                  onChanged: (v) =>
-                      setState(() => _draft.autoCloseBrackets = v),
-                ),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(_l10n.tr('set_drag_drop')),
-                  subtitle: Text(_l10n.tr('set_drag_drop_help')),
-                  value: _draft.dragAndDrop,
-                  onChanged: (v) => setState(() => _draft.dragAndDrop = v),
-                ),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(_l10n.tr('set_auto_hex_binary')),
-                  subtitle: Text(_l10n.tr('set_auto_hex_binary_help')),
-                  value: _draft.autoHexBinary,
-                  onChanged: (v) => setState(() => _draft.autoHexBinary = v),
-                ),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(_l10n.tr('set_auto_complete')),
-                  subtitle: Text(_l10n.tr('set_auto_complete_help')),
-                  value: _draft.autoComplete,
-                  onChanged: (v) => setState(() => _draft.autoComplete = v),
-                ),
-                _intField(
-                  label: _l10n.tr('set_auto_complete_min'),
-                  help: _l10n.tr('set_auto_complete_min_help'),
-                  value: _draft.autoCompleteMinChars,
-                  min: AppSettings.autoCompleteMinCharsMin,
-                  max: AppSettings.autoCompleteMinCharsMax,
-                  onSaved: (v) => _draft.autoCompleteMinChars = v,
-                ),
-                _intField(
-                  label: _l10n.tr('set_undo_max'),
-                  help: _l10n.tr('set_undo_max_help'),
-                  value: _draft.undoMaxSteps,
-                  min: AppSettings.undoMaxStepsMin,
-                  max: AppSettings.undoMaxStepsMax,
-                  onSaved: (v) => _draft.undoMaxSteps = v,
-                ),
-                _section(_l10n.tr('set_sec_backup')),
-                _row(
-                  _l10n.tr('set_auto_save'),
-                  _l10n.tr('set_auto_save_help'),
-                  DropdownButtonFormField<String>(
-                    // Take the column's width; the intrinsic width (the
-                    // longest item) overflows the row at a large UI scale.
-                    isExpanded: true,
-                    initialValue: _draft.autoSave,
-                    decoration: const InputDecoration(isDense: true),
-                    items: [
-                      for (final c in AppSettings.autoSaveChoices)
-                        DropdownMenuItem(
-                          value: c,
-                          child: Text(_l10n.tr('set_auto_save_$c')),
+                      // Font (family/size/line height/columns) moved to the font
+                      // dialog (View → Font Settings…), appearance to the color editor
+                      // (View → Color Editor…).
+                      _section(1, _l10n.tr('set_sec_editing')),
+                      _intField(
+                        label: _l10n.tr('set_tab_size'),
+                        help: _l10n.tr('set_tab_size_help'),
+                        value: _draft.tabSize,
+                        min: AppSettings.tabSizeMin,
+                        max: AppSettings.tabSizeMax,
+                        onSaved: (v) => _draft.tabSize = v,
+                      ),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(_l10n.tr('set_insert_spaces')),
+                        subtitle: Text(_l10n.tr('set_insert_spaces_help')),
+                        value: _draft.insertSpaces,
+                        onChanged: (v) =>
+                            setState(() => _draft.insertSpaces = v),
+                      ),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(_l10n.tr('set_auto_indent')),
+                        subtitle: Text(_l10n.tr('set_auto_indent_help')),
+                        value: _draft.autoIndent,
+                        onChanged: (v) => setState(() => _draft.autoIndent = v),
+                      ),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(_l10n.tr('set_auto_close')),
+                        subtitle: Text(_l10n.tr('set_auto_close_help')),
+                        value: _draft.autoCloseBrackets,
+                        onChanged: (v) =>
+                            setState(() => _draft.autoCloseBrackets = v),
+                      ),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(_l10n.tr('set_drag_drop')),
+                        subtitle: Text(_l10n.tr('set_drag_drop_help')),
+                        value: _draft.dragAndDrop,
+                        onChanged: (v) =>
+                            setState(() => _draft.dragAndDrop = v),
+                      ),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(_l10n.tr('set_auto_hex_binary')),
+                        subtitle: Text(_l10n.tr('set_auto_hex_binary_help')),
+                        value: _draft.autoHexBinary,
+                        onChanged: (v) =>
+                            setState(() => _draft.autoHexBinary = v),
+                      ),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(_l10n.tr('set_auto_complete')),
+                        subtitle: Text(_l10n.tr('set_auto_complete_help')),
+                        value: _draft.autoComplete,
+                        onChanged: (v) =>
+                            setState(() => _draft.autoComplete = v),
+                      ),
+                      _intField(
+                        label: _l10n.tr('set_auto_complete_min'),
+                        help: _l10n.tr('set_auto_complete_min_help'),
+                        value: _draft.autoCompleteMinChars,
+                        min: AppSettings.autoCompleteMinCharsMin,
+                        max: AppSettings.autoCompleteMinCharsMax,
+                        onSaved: (v) => _draft.autoCompleteMinChars = v,
+                      ),
+                      _intField(
+                        label: _l10n.tr('set_undo_max'),
+                        help: _l10n.tr('set_undo_max_help'),
+                        value: _draft.undoMaxSteps,
+                        min: AppSettings.undoMaxStepsMin,
+                        max: AppSettings.undoMaxStepsMax,
+                        onSaved: (v) => _draft.undoMaxSteps = v,
+                      ),
+                      _section(2, _l10n.tr('set_sec_save')),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(_l10n.tr('set_trim_trailing_ws')),
+                        subtitle: Text(_l10n.tr('set_trim_trailing_ws_help')),
+                        value: _draft.saveTrimTrailingWhitespace,
+                        onChanged: (v) => setState(
+                          () => _draft.saveTrimTrailingWhitespace = v,
                         ),
+                      ),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(_l10n.tr('set_final_newline')),
+                        subtitle: Text(_l10n.tr('set_final_newline_help')),
+                        value: _draft.saveEnsureFinalNewline,
+                        onChanged: (v) =>
+                            setState(() => _draft.saveEnsureFinalNewline = v),
+                      ),
+                      _section(3, _l10n.tr('set_sec_backup')),
+                      _row(
+                        _l10n.tr('set_auto_save'),
+                        _l10n.tr('set_auto_save_help'),
+                        DropdownButtonFormField<String>(
+                          // Take the column's width; the intrinsic width (the
+                          // longest item) overflows the row at a large UI scale.
+                          isExpanded: true,
+                          initialValue: _draft.autoSave,
+                          decoration: const InputDecoration(isDense: true),
+                          items: [
+                            for (final c in AppSettings.autoSaveChoices)
+                              DropdownMenuItem(
+                                value: c,
+                                child: Text(_l10n.tr('set_auto_save_$c')),
+                              ),
+                          ],
+                          onChanged: (v) =>
+                              setState(() => _draft.autoSave = v ?? 'off'),
+                        ),
+                      ),
+                      _intField(
+                        label: _l10n.tr('set_auto_save_delay'),
+                        help: _l10n.tr('set_auto_save_delay_help'),
+                        value: _draft.autoSaveDelaySec,
+                        min: AppSettings.autoSaveDelayMin,
+                        max: AppSettings.autoSaveDelayMax,
+                        onSaved: (v) => _draft.autoSaveDelaySec = v,
+                      ),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(_l10n.tr('set_backup_on_save')),
+                        subtitle: Text(_l10n.tr('set_backup_on_save_help')),
+                        value: _draft.backupOnSave,
+                        onChanged: (v) =>
+                            setState(() => _draft.backupOnSave = v),
+                      ),
+                      _row(
+                        _l10n.tr('set_backup_dir'),
+                        _l10n.tr('set_backup_dir_help'),
+                        TextFormField(
+                          initialValue: _draft.backupDir,
+                          decoration: const InputDecoration(isDense: true),
+                          onSaved: (s) => _draft.backupDir = (s ?? '').trim(),
+                        ),
+                      ),
+                      _intField(
+                        label: _l10n.tr('set_auto_stash_max'),
+                        help: _l10n.tr('set_auto_stash_max_help'),
+                        value: _draft.autoStashMaxMB,
+                        min: AppSettings.autoStashMaxMBMin,
+                        max: AppSettings.autoStashMaxMBMax,
+                        onSaved: (v) => _draft.autoStashMaxMB = v,
+                      ),
+                      _section(4, _l10n.tr('set_sec_startup')),
+                      // Keymap lives in the menubar (View → Keyboard Layout) and the UI
+                      // language in the Language menu — neither is duplicated here.
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(_l10n.tr('set_log_to_file')),
+                        subtitle: Text(
+                          _l10n.tr('set_log_help') +
+                              (_restartHint
+                                  ? _l10n.tr('set_restart_hint')
+                                  : ''),
+                        ),
+                        value: _draft.logToFile,
+                        onChanged: (v) => setState(() {
+                          _draft.logToFile = v;
+                          _restartHint = v != AppSettings.instance.logToFile;
+                        }),
+                      ),
                     ],
-                    onChanged: (v) =>
-                        setState(() => _draft.autoSave = v ?? 'off'),
                   ),
                 ),
-                _intField(
-                  label: _l10n.tr('set_auto_save_delay'),
-                  help: _l10n.tr('set_auto_save_delay_help'),
-                  value: _draft.autoSaveDelaySec,
-                  min: AppSettings.autoSaveDelayMin,
-                  max: AppSettings.autoSaveDelayMax,
-                  onSaved: (v) => _draft.autoSaveDelaySec = v,
-                ),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(_l10n.tr('set_backup_on_save')),
-                  subtitle: Text(_l10n.tr('set_backup_on_save_help')),
-                  value: _draft.backupOnSave,
-                  onChanged: (v) => setState(() => _draft.backupOnSave = v),
-                ),
-                _row(
-                  _l10n.tr('set_backup_dir'),
-                  _l10n.tr('set_backup_dir_help'),
-                  TextFormField(
-                    initialValue: _draft.backupDir,
-                    decoration: const InputDecoration(isDense: true),
-                    onSaved: (s) => _draft.backupDir = (s ?? '').trim(),
-                  ),
-                ),
-                _section(_l10n.tr('set_sec_startup')),
-                // Keymap lives in the menubar (View → Keyboard Layout) and the UI
-                // language in the Language menu — neither is duplicated here.
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(_l10n.tr('set_log_to_file')),
-                  subtitle: Text(
-                    _l10n.tr('set_log_help') +
-                        (_restartHint ? _l10n.tr('set_restart_hint') : ''),
-                  ),
-                  value: _draft.logToFile,
-                  onChanged: (v) => setState(() {
-                    _draft.logToFile = v;
-                    _restartHint = v != AppSettings.instance.logToFile;
-                  }),
-                ),
-              ],
-            ),
+              ),
+            ],
           ),
         ),
       ),
@@ -271,7 +370,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
 
   // ── field builders ────────────────────────────────────────────────────────
 
-  Widget _section(String title) => Padding(
+  Widget _section(int index, String title) => Padding(
+    key: _sectionKeys[index],
     padding: const EdgeInsets.only(top: 18, bottom: 4),
     child: Text(
       title,
@@ -280,6 +380,49 @@ class _SettingsDialogState extends State<SettingsDialog> {
       ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold),
     ),
   );
+
+  // Pinned top navigation: one chip per section. Tapping scrolls that section
+  // to the top of the body; the active chip follows the scroll position.
+  Widget _navBar() => Column(
+    children: [
+      SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            for (var i = 0; i < _sectionIds.length; i++)
+              _navButton(i, _l10n.tr(_sectionIds[i])),
+          ],
+        ),
+      ),
+      const Divider(height: 16),
+    ],
+  );
+
+  Widget _navButton(int index, String label) {
+    final active = index == _active;
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: Material(
+        color: active ? scheme.secondaryContainer : Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: () => _jumpTo(index),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Text(
+              label,
+              style: TextStyle(
+                fontWeight: active ? FontWeight.bold : FontWeight.normal,
+                color: active ? scheme.onSecondaryContainer : null,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 
   Widget _row(String label, String? help, Widget field) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 6),

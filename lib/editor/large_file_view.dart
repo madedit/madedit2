@@ -143,16 +143,9 @@ class _LargeFileEditorPageState extends State<LargeFileEditorPage>
   double _fifHeight = 260; // drag-resizable via the handle above the panel
   final GlobalKey<FindInFilesPanelState> _fifKey = GlobalKey();
 
-  // Quick font zoom (menu / command palette path). Zoom is a global setting,
-  // so it works without a pane too; the pane variant just adds the toast.
-  void _zoomFont(int steps) {
-    final a = _active;
-    if (a != null) {
-      a.zoomFont(steps);
-    } else {
-      AppSettings.instance.zoomFont(steps);
-    }
-  }
+  // Quick font zoom (menu / command palette path): per tab, so it acts on
+  // the active pane only.
+  void _zoomFont(int steps) => _active?.zoomFont(steps);
 
   // Open (or re-focus) the find-in-files panel; the folder field prefills
   // with the active file's directory on first open. [replace] (ctrl+shift+h)
@@ -276,6 +269,47 @@ class _LargeFileEditorPageState extends State<LargeFileEditorPage>
     active.setSyntax(picked);
   }
 
+  // ctrl+t: every symbol outline.dart finds in the active file as a quick
+  // pick (same rules as the outline panel); picking one jumps the caret there.
+  Future<void> _pickSymbol() async {
+    final active = _active;
+    if (active == null) return;
+    final l10n = AppLocalizations.of(context);
+    final lang = _outlineLanguageFor(active);
+    if (lang == null) {
+      await showQuickPick(
+        context,
+        hint: l10n.tr('symbols_pick_hint'),
+        items: const [],
+        emptyText: l10n.tr('ol_no_rules'),
+      );
+      return;
+    }
+    final r = await active.scanOutlineWith(lang);
+    if (!mounted) return;
+    final items = r?.items ?? const <OutlineItem>[];
+    if (items.isEmpty) {
+      await showQuickPick(
+        context,
+        hint: l10n.tr('symbols_pick_hint'),
+        items: const [],
+        emptyText: l10n.tr('ol_none'),
+      );
+      return;
+    }
+    final picked = await showQuickPick(
+      context,
+      hint: l10n.tr('symbols_pick_hint'),
+      items: [
+        for (final it in items)
+          QuickItem(it.name, '${it.kind}  ${it.line + 1}', '${it.offset}'),
+      ],
+    );
+    if (!mounted || picked == null) return;
+    final off = int.tryParse(picked);
+    if (off != null) _jumpToOutline(off);
+  }
+
   // A result row was clicked: open/jump and select the match's byte range
   // (selection is queued when the pane is still loading).
   void _openFifMatch(String path, int start, int end) {
@@ -354,6 +388,7 @@ class _LargeFileEditorPageState extends State<LargeFileEditorPage>
     Future.wait([
       _loadMenus(),
       _loadToolbar(),
+      _loadContextMenu(),
       deferredStartup ?? Future.value(),
     ]).then((_) => _announceMerges());
     // The scripts registry fills in after the first frame (main()'s deferred
@@ -455,9 +490,42 @@ class _LargeFileEditorPageState extends State<LargeFileEditorPage>
 
   // ── session ──────────────────────────────────────────────────
 
-  void _scheduleSessionSave() {
+  // A save queued by typing stashes only small untitled buffers (see
+  // _autoStashMaxBytes); any other trigger writes everything. A pending light
+  // save can be upgraded to a full one, never the other way round.
+  bool _sessionSavePending = false;
+  bool _sessionSaveLight = false;
+
+  void _scheduleSessionSave({bool light = false}) {
+    if (!_sessionSavePending) {
+      _sessionSaveLight = light;
+    } else if (!light) {
+      _sessionSaveLight = false;
+    }
+    _sessionSavePending = true;
     _sessionDebounce?.cancel();
-    _sessionDebounce = Timer(const Duration(seconds: 1), _saveSession);
+    _sessionDebounce = Timer(const Duration(seconds: 1), () {
+      _sessionSavePending = false;
+      final light = _sessionSaveLight;
+      _sessionSaveLight = false;
+      _saveSession(lightStash: light);
+    });
+  }
+
+  // Untitled buffers are re-stashed as they are typed, so a process that gets
+  // killed does not lose the whole tab. Large ones are exempt — rewriting
+  // hundreds of MB on a keystroke burst is not worth it; those are written by
+  // the layout/tab/close saves and at close time. The threshold is a setting
+  // (Settings → Advanced…, 0 = never re-stash while typing).
+  int get _autoStashMaxBytes => AppSettings.instance.autoStashMaxBytes;
+
+  void _onPaneDocChanged() {
+    for (final c in _controllers.values) {
+      if (c.path != null || !c.modified) continue;
+      if (c.documentLength > _autoStashMaxBytes) continue;
+      _scheduleSessionSave(light: true);
+      return;
+    }
   }
 
   // Window geometry is cached into the settings fields as it changes, so
@@ -549,17 +617,45 @@ class _LargeFileEditorPageState extends State<LargeFileEditorPage>
     await windowManager.close();
   }
 
-  Future<void> _saveSession() async {
+  Future<void> _saveSession({bool lightStash = false}) async {
     if (!widget.sessionEnabled) return; // --new-window: never writes the session
     _sessionDebounce?.cancel();
+    _sessionSavePending = false;
+    _sessionSaveLight = false;
     if (!_windowReady) return; // headless tests: nothing to persist
     final s = AppSettings.instance;
     // Window geometry comes from the cache _onWindowChanged keeps — never
     // queried here (the close path runs with the window already hidden).
     final files = <SessionFile>[];
+    final stashes = <int, EditorController?>{};
     for (final e in _controllers.entries) {
       final path = e.value.path;
-      if (path == null) continue; // untitled panes are not persisted
+      if (path == null) {
+        // Untitled tabs survive too: their bytes go to settings/untitled/.
+        // The session JSON is written BEFORE the stashes (the close path
+        // gives us 3 seconds) — a missing/truncated stash costs one pane,
+        // losing the session would cost every tab.
+        // A null entry keeps the existing stash without rewriting it: saves
+        // triggered by typing do not copy huge buffers.
+        stashes[e.key] =
+            lightStash && e.value.documentLength > _autoStashMaxBytes
+            ? null
+            : e.value;
+        files.add(
+          SessionFile(
+            id: e.key,
+            path: _untitledStashPath(e.key),
+            caret: e.value.caretOffset,
+            anchor: e.value.anchorOffset,
+            encoding: e.value.manualEncoding,
+            bookmarks: e.value.bookmarks,
+            wrap: e.value.wrapOverride,
+            zoom: e.value.zoom,
+            untitled: true,
+          ),
+        );
+        continue;
+      }
       files.add(
         SessionFile(
           id: e.key,
@@ -569,6 +665,7 @@ class _LargeFileEditorPageState extends State<LargeFileEditorPage>
           encoding: e.value.manualEncoding,
           bookmarks: e.value.bookmarks,
           wrap: e.value.wrapOverride,
+          zoom: e.value.zoom,
           // macOS sandbox: without this the path is unreachable after a relaunch.
           bookmark: await MacFiles.bookmarkOf(path),
         ),
@@ -580,6 +677,50 @@ class _LargeFileEditorPageState extends State<LargeFileEditorPage>
         : _layout.stringify(parser: const _SessionIdParser());
     s.sessionActiveId = _activeId ?? -1;
     await s.save();
+    await _writeStashes(stashes);
+  }
+
+  static String _untitledStashPath(int id) =>
+      settingsPath('untitled/pane-$id.txt');
+
+  // Write the untitled buffers, then delete stashes no longer referenced by
+  // a pane (closed tabs, panes that became file-backed, leftovers from an
+  // interrupted write). One failing pane must not skip the others or the
+  // cleanup — a stale stash left behind would come back as a phantom tab.
+  // A null value means "referenced, but not rewritten this round": its stash
+  // stays on disk and must survive the cleanup.
+  Future<void> _writeStashes(Map<int, EditorController?> stashes) async {
+    final dir = Directory(settingsPath('untitled'));
+    try {
+      if (stashes.values.any((c) => c != null)) {
+        await dir.create(recursive: true);
+      }
+      for (final e in stashes.entries) {
+        final c = e.value;
+        if (c == null) continue;
+        try {
+          await c.stashTo(_untitledStashPath(e.key));
+        } catch (err) {
+          Log.instance.w('untitled stash failed (pane ${e.key}): $err');
+        }
+      }
+    } catch (e) {
+      Log.instance.w('untitled stash failed: $e');
+    }
+    try {
+      if (!await dir.exists()) return;
+      final keep = {
+        for (final id in stashes.keys) _untitledStashPath(id),
+      };
+      await for (final ent in dir.list()) {
+        if (ent is! File || keep.contains(ent.path)) continue;
+        try {
+          await ent.delete();
+        } catch (_) {}
+      }
+    } catch (e) {
+      Log.instance.w('untitled stash cleanup failed: $e');
+    }
   }
 
   // Restore the saved docking layout (files that vanished become untitled
@@ -785,20 +926,34 @@ class _LargeFileEditorPageState extends State<LargeFileEditorPage>
     controller.onScrollRows = (n) => _syncScroll(id, rows: n);
     controller.onScrollX = (x) => _syncScroll(id, x: x);
     controller.bookmarksEpoch.addListener(() => _bookmarkTick.value++);
+    controller.docEpoch.addListener(_onPaneDocChanged);
     _controllers[id] = controller;
-    if (f != null) _paths[id] = _canonical(f.path);
+    final untitled = f != null && f.untitled;
+    if (f != null && !untitled) _paths[id] = _canonical(f.path);
     return DockingItem(
       id: id,
       // The visible title is rendered by [leading] (so it can carry a
       // full-path tooltip and a right-click menu — TabData.text can't);
       // name stays empty or the tab would show the title twice.
       name: '',
-      leading: (context, status) => _tabTitle(context, id, f?.path),
+      leading: (context, status) =>
+          _tabTitle(context, id, untitled ? null : f?.path),
       keepAlive: true,
       weight: weight,
       maximized: maximized,
       widget: f == null
           ? EditorView(controller: controller, startBlank: true)
+          : untitled
+          ? EditorView(
+              controller: controller,
+              initialUntitledStash: f.path,
+              initialCaret: f.caret,
+              initialAnchor: f.anchor,
+              initialEncoding: f.encoding,
+              initialBookmarks: f.bookmarks,
+              initialWrap: f.wrap,
+              initialZoom: f.zoom,
+            )
           : EditorView(
               controller: controller,
               initialPath: f.path,
@@ -807,6 +962,7 @@ class _LargeFileEditorPageState extends State<LargeFileEditorPage>
               initialEncoding: f.encoding,
               initialBookmarks: f.bookmarks,
               initialWrap: f.wrap,
+              initialZoom: f.zoom,
             ),
     );
   }
@@ -1116,6 +1272,45 @@ class _LargeFileEditorPageState extends State<LargeFileEditorPage>
     if (mounted) setState(() => _toolbarItems = items);
   }
 
+  // The editor's right-click menu (settings/context_menu.json, else the
+  // bundled default), merged like the toolbar: a flat list with no deleted
+  // area, so the first run only records the base snapshot. Not seeded — the
+  // context menu editor writes the external file on its first save.
+  Future<void> _loadContextMenu() async {
+    final map = await _loadConfigMap(
+      'context_menu.json',
+      'assets/context_menu.json',
+    );
+    EditorController.contextMenuItems = await _mergeWithDefaults(
+      rel: 'context_menu.json',
+      asset: 'assets/context_menu.json',
+      key: 'items',
+      user: MenuNode.parseNodes(map['items']),
+      mergeWithoutBase: false,
+    );
+  }
+
+  // Context menu editor: the draft becomes the live list while the dialog is
+  // open (nothing to preview on screen, but it keeps the flow identical to
+  // the toolbar editor); cancel puts the original back.
+  Future<void> _openContextMenuEditor() async {
+    final original = EditorController.contextMenuItems ?? const <MenuNode>[];
+    final draft = [for (final m in original) m.deepCopy()];
+    EditorController.contextMenuItems = draft;
+    final saved = await showContextMenuEditorDialog(
+      context,
+      draft: draft,
+      // Main-menu actions plus the context-only "Delete" (selection), so a
+      // removed Delete can come back from the unused area.
+      menuSource: [
+        const MenuNode(labelKey: 'ctx_delete', action: 'ctx.delete'),
+        ..._menus,
+      ],
+      onChanged: () {},
+    );
+    if (!saved) EditorController.contextMenuItems = original;
+  }
+
   /// Reconcile a user-owned config tree with the packaged defaults.
   ///
   /// [rel] is the settings-relative path, [asset] its bundled counterpart and
@@ -1204,7 +1399,11 @@ class _LargeFileEditorPageState extends State<LargeFileEditorPage>
       for (final e in _mergeAdded.entries)
         if (e.value > 0)
           l10n.trf(
-            e.key == 'toolbar.json' ? 'merge_toolbar_updated' : 'merge_menu_updated',
+            switch (e.key) {
+              'toolbar.json' => 'merge_toolbar_updated',
+              'context_menu.json' => 'merge_context_menu_updated',
+              _ => 'merge_menu_updated',
+            },
             ['${e.value}'],
           ),
       // Built-in scripts the user had edited: the new text is parked as .new
@@ -1612,6 +1811,7 @@ class _LargeFileEditorPageState extends State<LargeFileEditorPage>
         encoding: restore?.encoding,
         bookmarks: restore?.bookmarks ?? const [],
         wrap: restore?.wrap,
+        zoom: restore?.zoom ?? 1,
       ),
     );
 
@@ -2027,9 +2227,12 @@ class _LargeFileEditorPageState extends State<LargeFileEditorPage>
   }
 
   // Window close with modified panes: one prompt covers them all. True =
-  // go ahead and close.
+  // go ahead and close. Untitled panes are NOT asked about — their content
+  // is stashed under settings/untitled/ and comes back on the next start.
   Future<bool> _confirmCloseAll() async {
-    final dirty = _controllers.entries.where((e) => e.value.modified).toList();
+    final dirty = _controllers.entries
+        .where((e) => e.value.modified && e.value.path != null)
+        .toList();
     if (dirty.isEmpty) return true;
     if (_unsavedDialogOpen) return false;
     _unsavedDialogOpen = true;
@@ -2054,7 +2257,8 @@ class _LargeFileEditorPageState extends State<LargeFileEditorPage>
   // ── reopen closed tab (ctrl+shift+t) ──────────────────────
 
   // Recently closed file-backed panes, newest last. Untitled panes are not
-  // recorded — their content is never persisted.
+  // recorded: their content lives in the session stash, and the stash cleanup
+  // drops the file as soon as no pane references it (closing one asks first).
   final List<SessionFile> _closedStack = [];
   static const int _closedStackMax = 10;
 
@@ -2065,6 +2269,7 @@ class _LargeFileEditorPageState extends State<LargeFileEditorPage>
     final enc = c.manualEncoding;
     final marks = c.bookmarks;
     final wrapOverride = c.wrapOverride;
+    final zoom = c.zoom;
     // The bookmark lookup is async (macOS re-grant across close/reopen);
     // push after it resolves — order within the stack still holds.
     () async {
@@ -2082,6 +2287,7 @@ class _LargeFileEditorPageState extends State<LargeFileEditorPage>
           bookmark: bm,
           bookmarks: marks,
           wrap: wrapOverride,
+          zoom: zoom,
         ),
       );
       if (_closedStack.length > _closedStackMax) _closedStack.removeAt(0);
@@ -2191,6 +2397,10 @@ class _LargeFileEditorPageState extends State<LargeFileEditorPage>
         _openCommandPalette();
       case 'view.wordCount':
         _active?.showWordCount();
+      case 'view.checksum':
+        _active?.showChecksum();
+      case 'view.copyBytes':
+        _active?.copyBytes();
       case 'view.diff':
         _openDiffDialog();
       case 'view.merge3':
@@ -2201,6 +2411,8 @@ class _LargeFileEditorPageState extends State<LargeFileEditorPage>
         _active?.toggleTail();
       case 'view.outline':
         _toggleOutlinePanel();
+      case 'view.symbols':
+        _pickSymbol();
       case 'bookmark.panel':
         setState(() => _bookmarkPanelOpen = !_bookmarkPanelOpen);
       case 'view.syncScrollV':
@@ -2348,6 +2560,8 @@ class _LargeFileEditorPageState extends State<LargeFileEditorPage>
         _openMenuEditor();
       case 'toolbar.editor':
         _openToolbarEditor();
+      case 'contextMenu.editor':
+        _openContextMenuEditor();
       case 'appearance.editor':
         showAppearanceDialog(context);
       case 'color.editor':
@@ -3670,7 +3884,9 @@ class _LargeFileEditorPageState extends State<LargeFileEditorPage>
       if (active == null || !active.hasDoc || active.syntaxMode != 'auto') {
         return l10n.tr('syntax_auto');
       }
-      final eff = active.effectiveSyntax ?? l10n.tr('syntax_plain');
+      final eff = active.effectiveSyntaxIsDefault
+          ? l10n.tr('syntax_hl_default')
+          : active.effectiveSyntax ?? l10n.tr('syntax_plain');
       return l10n.trf('syntax_auto_using', [eff]);
     }
 

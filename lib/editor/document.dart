@@ -179,7 +179,8 @@ class Document {
   final LargeFile _orig;
   final List<int> _add = []; // add buffer (append-only)
   bool _edited = false; // whether any edit happened (tree vs index coords)
-  bool _origLfExact = false; // initial original piece's lf corrected yet?
+  bool _treeLfExact = false; // every piece's lf matches the CURRENT codec's newline rules?
+  Future<void>? _lfFix; // in-flight recount, shared by concurrent callers
 
   /// Notified on every byte splice — insert (+delta at offset) or delete
   /// (-delta) — including undo/redo, since [apply] funnels through the same
@@ -200,8 +201,9 @@ class Document {
   /// reloads its window after changing this.
   ///
   /// Switching to/from a unit-based codec (UTF-16/32) changes what counts as
-  /// a newline, so the underlying line index resets (restart it if wanted)
-  /// and the original piece's line-feed count is re-derived on demand.
+  /// a newline, so the underlying line index resets (restart it if wanted) and
+  /// every piece's line-feed count is marked stale; the next line-number query
+  /// or edit recounts the tree under the new rules (see [_ensureTreeLfExact]).
   TextCodec get codec => _codec;
 
   set codec(TextCodec c) {
@@ -213,8 +215,10 @@ class Document {
     if (changed) {
       _orig.configureNewlines(unit: c.unitSize, littleEndian: c.littleEndian);
       // Any pre-computed newline count used the old rules; recount lazily
-      // before the next edit.
-      if (_orig.size > 0) _origLfExact = false;
+      // before the next edit or line-number query. The original file may be
+      // empty (untitled document) while edited pieces still carry stale
+      // counts, hence the _edited check too.
+      if (_orig.size > 0 || _edited) _treeLfExact = false;
     }
   }
 
@@ -255,7 +259,7 @@ class Document {
     final doc = Document._(tree, orig);
     // Whether the initial piece's lf is authoritative: empty file, injected
     // count, or a scan are all exact; only the deferred case (scan=false) is not.
-    doc._origLfExact =
+    doc._treeLfExact =
         size == 0 || originalLineFeeds != null || scanOriginalLineFeeds;
     return doc;
   }
@@ -264,7 +268,7 @@ class Document {
   /// in the add buffer until it is saved somewhere).
   static Future<Document> openEmpty() async {
     final doc = Document._(PieceTree.empty(), await LargeFile.openEmpty());
-    doc._origLfExact = true;
+    doc._treeLfExact = true;
     return doc;
   }
 
@@ -312,7 +316,7 @@ class Document {
 
   /// Start offset of line [line] (0-based). Unedited: via the underlying index
   /// (O(log)); after edits: a document-coordinate scan (rare path). Exact only
-  /// with [origLfExact] / an index.
+  /// once the tree's newline counts are exact (index built / recounted).
   Future<int> byteOffsetOfLine(int line) async {
     if (line <= 0) return 0;
     if (!_edited) return _orig.byteOffsetOfLine(line);
@@ -822,6 +826,7 @@ class Document {
 
   /// Line number of the line containing [offset] (0-based, exact).
   Future<int> lineAtOffset(int offset) async {
+    await _ensureTreeLfExact(); // a codec switch may have left the tree stale
     if (offset <= 0) return 0;
     if (offset >= _tree.length) return _tree.lineFeeds;
     final loc = _tree.locate(offset);
@@ -845,7 +850,7 @@ class Document {
   /// which would turn it into two bytes.
   Future<ReverseEdit> insertBytes(int offset, List<int> bytes) async {
     if (bytes.isEmpty) return ReverseEdit._noop();
-    await _ensureOrigLfExact();
+    await _ensureTreeLfExact();
     _edited = true;
     await _ensureBoundary(offset);
     final start = _add.length;
@@ -892,7 +897,7 @@ class Document {
     final end = (off + length) > _tree.length ? _tree.length : off + length;
     final len = end - off;
     if (len <= 0) return ReverseEdit._noop();
-    await _ensureOrigLfExact();
+    await _ensureTreeLfExact();
     _edited = true;
     await _ensureBoundary(off);
     await _ensureBoundary(off + len);
@@ -910,11 +915,16 @@ class Document {
       case _EditKind.delete:
         return delete(e.offset, e.length);
       case _EditKind.insertPieces:
+        await _ensureTreeLfExact();
         await _ensureBoundary(e.offset);
         var cursor = e.offset;
         var total = 0;
         for (final p in e.pieces) {
-          _tree.insertPieceAt(cursor, p.buffer, p.start, p.length, p.lf);
+          // The removed pieces were recorded under the rules active at delete
+          // time; a later codec switch does not reach them (they are not in
+          // the tree to be recounted), so re-count lf under the CURRENT rules.
+          final lf = await _bufNewlines(p.buffer, p.start, p.length);
+          _tree.insertPieceAt(cursor, p.buffer, p.start, p.length, lf);
           cursor += p.length;
           total += p.length;
         }
@@ -971,27 +981,51 @@ class Document {
 
   // ── internal helpers ────────────────────────────────────────
 
-  // Before the first edit, correct the initial original piece's lf to the exact
-  // value (the tree is still a single piece at this point). Every piece produced
-  // by later splits gets an exact lf from a newlinesIn scan, so it stays exact
-  // throughout.
-  // Files above the auto-index cap have no index yet; building it here (parallel
-  // isolates) is both faster than a single-threaded scan and leaves the chunk
-  // table behind, so every later piece split near the edit point counts
-  // newlines from the table instead of re-reading up to the edit — the first
-  // edit on a GB file went from ~5 s to the index build, later far-away edits
-  // from ~5 s to milliseconds.
-  Future<void> _ensureOrigLfExact() async {
-    if (_origLfExact) return;
-    final size = _orig.size;
-    if (size > 0 && !_orig.indexDone) {
-      final done = _orig.whenIndexed();
-      onIndexWait?.call(done);
-      await done;
-    }
-    final lf = size == 0 ? 0 : _orig.lineCount - 1;
-    _tree.setSinglePieceLf(lf);
-    _origLfExact = true;
+  // Make every piece's lf in the tree authoritative under the CURRENT codec's
+  // newline rules. Sources of staleness (both flagged by the codec setter /
+  // open paths): before the first edit the single original piece may hold an
+  // old-rule or deferred count; after edits, per-piece counts were computed
+  // under whatever rules were active when each split/insert happened.
+  // Unedited: correct the single piece from the index (files above the
+  // auto-index cap build it here: parallel isolates beat a serial scan and
+  // leave the chunk table for later piece splits).
+  // Edited: recount each piece under the new rules. Add-buffer pieces scan
+  // in memory; original ranges are disjoint and ascending, so the piece scans
+  // together are one sequential pass over the live file bytes. Concurrent
+  // callers share one in-flight recount; tree mutations only ever happen
+  // after an ensure completed, so counts cannot be applied to a changed tree.
+  Future<void> _ensureTreeLfExact() {
+    if (_treeLfExact) return Future.value();
+    return _lfFix ??= (() async {
+      if (!_edited) {
+        final size = _orig.size;
+        if (size > 0 && !_orig.indexDone) {
+          final done = _orig.whenIndexed();
+          onIndexWait?.call(done);
+          await done;
+        }
+        final lf = size == 0 ? 0 : _orig.lineCount - 1;
+        _tree.setSinglePieceLf(lf);
+        _treeLfExact = true;
+        return;
+      }
+      final ranges = <(int, int, int)>[];
+      _tree.visitFrom(0, (b, s, l) {
+        ranges.add((b, s, l));
+        return true;
+      });
+      final counts = <int>[];
+      for (final (b, s, l) in ranges) {
+        counts.add(
+          b == 1
+              ? _countNlUnits(_add, s, s + l)
+              : await _orig.newlinesIn(s, s + l),
+        );
+      }
+      var i = 0;
+      _tree.recomputeLf((b, s, l) => counts[i++]);
+      _treeLfExact = true;
+    })().whenComplete(() => _lfFix = null);
   }
 
   Future<void> _ensureBoundary(int offset) async {

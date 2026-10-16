@@ -1,0 +1,29 @@
+{
+  "_comment": "Editor right-click menu: a flat list of MenuNode items (labelKey, action dispatched like a menu item or key binding, optional icon from the menuIcons whitelist) and separators. External settings/context_menu.json overrides this bundled default; edit via Settings > Context Menu Editor. ctx.delete deletes the selection. In hex mode the search, bookmark, comment, case and fold items are hidden; fold items only appear when the file has foldable regions.",
+  "items": [
+    { "labelKey": "item_undo", "action": "edit.undo", "icon": "undo" },
+    { "labelKey": "item_redo", "action": "edit.redo", "icon": "redo" },
+    { "type": "separator" },
+    { "labelKey": "item_cut", "action": "edit.cut", "icon": "content_cut" },
+    { "labelKey": "item_copy", "action": "edit.copy", "icon": "content_copy" },
+    { "labelKey": "item_paste", "action": "edit.paste", "icon": "content_paste" },
+    { "labelKey": "ctx_delete", "action": "ctx.delete" },
+    { "type": "separator" },
+    { "labelKey": "item_select_all", "action": "edit.selectAll" },
+    { "type": "separator" },
+    { "labelKey": "item_find", "action": "search.find", "icon": "search" },
+    { "labelKey": "item_replace", "action": "search.replace", "icon": "find_replace" },
+    { "labelKey": "item_goto_line", "action": "search.gotoLine" },
+    { "labelKey": "item_checksum", "action": "view.checksum", "icon": "fingerprint" },
+    { "labelKey": "item_copy_bytes", "action": "view.copyBytes", "icon": "code" },
+    { "labelKey": "item_show_symbols", "action": "view.symbols", "icon": "tag" },
+    { "type": "separator" },
+    { "labelKey": "item_bookmark_toggle", "action": "bookmark.toggle", "icon": "bookmark_add" },
+    { "labelKey": "item_toggle_comment", "action": "edit.toggleComment" },
+    { "labelKey": "item_upper", "action": "edit.upper" },
+    { "labelKey": "item_lower", "action": "edit.lower" },
+    { "type": "separator" },
+    { "labelKey": "item_fold", "action": "fold.fold" },
+    { "labelKey": "item_unfold", "action": "fold.unfold" }
+  ]
+}

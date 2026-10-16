@@ -193,6 +193,7 @@ String? keyNameOf(LogicalKeyboardKey k) {
   if (k == LogicalKeyboardKey.tab) return 'tab';
   if (k == LogicalKeyboardKey.backspace) return 'backspace';
   if (k == LogicalKeyboardKey.delete) return 'delete';
+  if (k == LogicalKeyboardKey.insert) return 'insert';
   if (k == LogicalKeyboardKey.arrowUp) return 'up';
   if (k == LogicalKeyboardKey.arrowDown) return 'down';
   if (k == LogicalKeyboardKey.arrowLeft) return 'left';

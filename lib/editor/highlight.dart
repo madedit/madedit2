@@ -333,17 +333,26 @@ class HighlightConfig {
 /// may span multiple lines inside the window); strings are bounded to a single
 /// line (they don't span lines).
 class SimpleHighlighter implements Highlighter {
-  SimpleHighlighter(this.cfg, {this.label = ''});
+  SimpleHighlighter(this.cfg, {this.label = '', this.isDefault = false});
   final LangConfig cfg;
 
   /// What the config was picked for (a file extension), for [description] only.
   final String label;
 
+  /// [cfg] is highlight.json's "default" entry: no language claims the
+  /// extension, so the Syntax menu must not present [label] as a language.
+  final bool isDefault;
+
   /// Pick a config by file extension from [HighlightConfig.instance].
-  factory SimpleHighlighter.forExtension(String ext) => SimpleHighlighter(
-    HighlightConfig.instance.forExt(ext),
-    label: ext.toLowerCase(),
-  );
+  factory SimpleHighlighter.forExtension(String ext) {
+    final e = ext.toLowerCase();
+    final config = HighlightConfig.instance;
+    return SimpleHighlighter(
+      config.forExt(e),
+      label: e,
+      isDefault: !config.byExtension.containsKey(e),
+    );
+  }
 
   bool _inBlock =
       false; // whether inside a multi-line block comment (carried line-by-line while highlighting a window)
@@ -358,11 +367,13 @@ class SimpleHighlighter implements Highlighter {
 
   @override
   HlSession? createSession() =>
-      SimpleHlSession(SimpleHighlighter(cfg, label: label));
+      SimpleHlSession(SimpleHighlighter(cfg, label: label, isDefault: isDefault));
 
   @override
   String get description => label.isEmpty
       ? 'pure-Dart lexical highlighting'
+      : isDefault
+      ? 'pure-Dart lexical highlighting (.$label, highlight.json default)'
       : 'pure-Dart lexical highlighting (.$label)';
 
   @override

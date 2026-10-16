@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../l10n/app_localizations.dart';
+import '../menu/json_menu_bar.dart' show MenuNode;
 import '../settings/app_settings.dart';
 import '../settings/resizable_dialog.dart';
 import '../settings/config_loader.dart';
@@ -17,6 +18,7 @@ import '../util/log.dart';
 import '../util/mac_files.dart';
 import 'column_block.dart';
 import 'document.dart';
+import 'editorconfig.dart';
 import 'macro.dart';
 import 'multi_cursor.dart';
 import 'nav_history.dart';
@@ -37,6 +39,8 @@ import 'large_file.dart' show IndexProgress;
 import 'highlight.dart';
 import 'bracket_match.dart';
 import 'caret_column.dart';
+import 'byte_format.dart';
+import 'checksum.dart';
 import 'clipboard_history.dart';
 import 'column_editor.dart';
 import 'search.dart';
@@ -45,6 +49,7 @@ import 'text_stats.dart';
 import 'soft_wrap.dart';
 import 'tab_expand.dart';
 import 'rust_highlight.dart';
+import 'save_transform.dart';
 import 'user_script.dart';
 import 'wasm_grammar.dart';
 import '../src/rust/api/script.dart' as rust_script;
@@ -54,6 +59,15 @@ import 'keybinding/key_chord.dart';
 import 'keybinding/keymap.dart';
 import 'keybinding/resolver.dart';
 import 'keybinding/user_keymap.dart';
+
+part 'editor_view_layout.dart';
+part 'editor_view_text_viewport.dart';
+part 'editor_view_dialogs.dart';
+part 'editor_view_hex.dart';
+part 'editor_view_bookmarks.dart';
+part 'editor_view_nav.dart';
+part 'editor_view_completion.dart';
+part 'editor_view_search.dart';
 
 /// The editor's view mode: plain text / column (rectangular) / hex.
 enum ViewMode { text, column, hex }
@@ -78,8 +92,6 @@ const Set<PointerDeviceKind> _pointerDragDevices = {
 // These read [AppSettings] (settings/settings.json, edited in the settings page) rather than being
 // hard-coded, and are getters so a change applies live: every use site re-reads on the next
 // build/paint, which _EditorViewState triggers by listening to the settings.
-double get _fontSize => AppSettings.instance.zoomedFontSize;
-double get _lineHeight => AppSettings.instance.zoomedLineHeight;
 Color get _bg => Color(AppSettings.instance.bgArgb);
 Color get _gutterBg => Color(AppSettings.instance.gutterBgArgb);
 // Search / goto bars and the status bar are chrome, not gutter.
@@ -128,1197 +140,6 @@ String get _monoFont {
       : Platform.isMacOS
       ? 'Menlo'
       : 'monospace';
-}
-
-// ── Shared text/geometry helpers (used by both render and hit-test so coordinates agree) ──
-
-const double _gutterPad = 10;
-const Color _thumb = Color(0x66AAAAAA);
-const double _scrollbarMargin = 14; // width reserved for the right-hand scrollbar
-
-/// Layout width for a single-line Paragraph: large enough that every glyph of the line is
-/// laid out, so content to the right is still drawn after horizontal scrolling (canvas
-/// translation). Bounded because readWindow caps a single line at 1MB.
-const double _layoutMaxW = 16777216; // 1 << 24
-
-/// x of a character index within its row (relative to the text origin). Shared by render and
-/// caret horizontal scrolling.
-/// (Public for test/caret_x_bidi_test.dart.)
-double caretXInParagraph(ui.Paragraph p, int charIndex) {
-  // The caret before paragraph index i sits on the edge of the glyph before
-  // it: an LTR glyph's RIGHT edge, an RTL glyph's LEFT edge (text advances
-  // leftward there). The old `getBoxesForRange(0, i).last.right` was the
-  // visual right of whichever run came last — wrong inside and after a
-  // right-to-left run (Arabic / Hebrew in a line).
-  if (charIndex <= 0) {
-    final first = p.getBoxesForRange(0, 1);
-    if (first.isEmpty) return 0;
-    final b = first.first;
-    return b.direction == ui.TextDirection.rtl ? b.right : b.left;
-  }
-  final prev = p.getBoxesForRange(charIndex - 1, charIndex);
-  if (prev.isNotEmpty) {
-    final b = prev.last;
-    return b.direction == ui.TextDirection.rtl ? b.left : b.right;
-  }
-  // A zero-width glyph (surrogate half, combining mark on its own): fall
-  // back to the end of everything before it.
-  final boxes = p.getBoxesForRange(0, charIndex);
-  return boxes.isEmpty ? 0 : boxes.last.right;
-}
-
-int get _tabSize => AppSettings.instance.tabSize;
-
-/// A laid-out row with tabs expanded to the tab stops (settings → Tab width):
-/// the paragraph shows spaces, [map] converts the row's own UTF-16 indices
-/// to paragraph indices, and the helpers hide the difference so callers keep
-/// working in row indices.
-class _LinePara {
-  const _LinePara(this.para, this.map, {this.rtl = false});
-  final ui.Paragraph para;
-  final Int32List map;
-
-  /// Laid out with a right-to-left base direction (first strong character
-  /// is RTL, see bidi.dart). Such a row is shown right-aligned: every x the
-  /// painter / hit-test computes from this paragraph is offset by
-  /// [rtlShift] of the text area's width.
-  final bool rtl;
-
-  /// Horizontal offset that right-aligns an RTL row inside a text area
-  /// [areaW] wide; 0 for LTR rows, and for RTL rows wider than the area
-  /// (those overflow to the right like LTR ones — horizontal scrolling keeps
-  /// one origin).
-  double rtlShift(double areaW) =>
-      rtl && width < areaW ? areaW - width : 0;
-
-  int _d(int charIndex) =>
-      map[charIndex < 0
-          ? 0
-          : (charIndex >= map.length ? map.length - 1 : charIndex)];
-
-  /// x of row char index [charIndex] (relative to the text start).
-  double xOf(int charIndex) => caretXInParagraph(para, _d(charIndex));
-
-  /// Glyph boxes covering row chars [a, b).
-  List<ui.TextBox> boxes(int a, int b) => para.getBoxesForRange(_d(a), _d(b));
-
-  /// Row char index nearest to x = [dx] (hit test).
-  int charAt(double dx) => charForDisplay(
-    map,
-    para.getPositionForOffset(Offset(dx, _lineHeight / 2)).offset,
-  );
-
-  double get width => para.maxIntrinsicWidth;
-  double get height => para.height;
-}
-
-/// Row shift in document RTL layout: every row's right edge sits on the
-/// common right edge max([areaW], [contentW]) (the text area, or the widest
-/// visible row's extent when that overflows the view), so line starts line
-/// up whatever their length. [contentW] includes the caret padding that
-/// _measureContentW adds, which thus lands on the left = the line-end side.
-double rtlLayoutShift(double rowWidth, double areaW, double contentW) {
-  final right = contentW > areaW ? contentW : areaW;
-  final s = right - rowWidth;
-  return s > 0 ? s : 0;
-}
-
-final RegExp _wordCharRe = RegExp(r'[\p{L}\p{N}_]', unicode: true);
-
-/// First index in sorted [a] whose value is >= [v] (a.length when none).
-int _lowerBound(List<int> a, int v) {
-  var lo = 0, hi = a.length;
-  while (lo < hi) {
-    final mid = (lo + hi) >> 1;
-    if (a[mid] < v) {
-      lo = mid + 1;
-    } else {
-      hi = mid;
-    }
-  }
-  return lo;
-}
-
-/// Whether the character covering code unit [j] of [s] is a word character
-/// (letter / digit / underscore); surrogate halves resolve to their pair.
-bool _isWordCharAt(String s, int j) {
-  var k = j;
-  if ((s.codeUnitAt(k) & 0xFC00) == 0xDC00 && k > 0) k--;
-  final pair = (s.codeUnitAt(k) & 0xFC00) == 0xD800 && k + 1 < s.length;
-  return _wordCharRe.hasMatch(s.substring(k, k + (pair ? 2 : 1)));
-}
-
-/// Display column a soft-wrap slice starts at (0 for a line's first row):
-/// tab stops inside the slice depend on the columns its prefix occupies.
-int _rowStartColumn(DocWindow? win, WrapRow row) {
-  if (row.isFirst || win == null || row.lineIndex >= win.lines.length) return 0;
-  final line = win.lines[row.lineIndex];
-  final cs = row.charStart > line.length ? line.length : row.charStart;
-  return displayColumn(line.substring(0, cs), _tabSize);
-}
-
-/// Gutter (line-number column) width: estimated from the digit count of the largest visible
-/// line number. Shared by render and hit-test.
-double _gutterWidthFor(int anchorLine, int linesInWindow) {
-  final maxNo = anchorLine >= 0 ? anchorLine + linesInWindow + 1 : 0;
-  final digits = maxNo > 0 ? maxNo.toString().length : 7;
-  return digits.clamp(4, 12) * (_fontSize * 0.62) + _gutterPad * 2;
-}
-
-/// Build one laid-out Paragraph for a row (single line, no wrapping, no ellipsis). Shared by
-/// painting and measurement.
-_LinePara _buildLine(
-  String raw,
-  double maxWidth, [
-  Color? textColor,
-  int startColumn = 0,
-  bool? baseRtl,
-]) {
-  final ex = expandTabs(raw, _tabSize, startColumn: startColumn);
-  final text = ex.display;
-  final color = textColor ?? _fg;
-  final rtl = baseRtl ?? isRtlText(text);
-  final pb =
-      ui.ParagraphBuilder(_lineParagraphStyle(rtl))..pushStyle(
-        ui.TextStyle(color: color, fontSize: _fontSize, fontFamily: _monoFont),
-      );
-  pb.addText(text);
-  return _LinePara(
-    pb.build()..layout(ui.ParagraphConstraints(width: maxWidth)),
-    ex.map,
-    rtl: rtl,
-  );
-}
-
-/// Width of the vertical scrollbar hot zone overlaid on the text area's right
-/// edge (mirrors the `width: 16` of that Positioned in build; tests use it to
-/// keep their taps out of the zone). The text area itself reserves
-/// [_scrollbarMargin] so right-aligned RTL rows stop short of the scrollbar.
-const double vScrollbarWidth = 16;
-
-/// One row's paragraph style. The base direction follows the row's first
-/// strong character so neutrals (punctuation, brackets, digits) resolve the
-/// way an RTL reader expects — except in document RTL layout, where every
-/// row is an RTL paragraph (`baseRtl: true`, like Word / Google Docs
-/// "right-to-left": an English-led line then shows its English run at the
-/// right end); the alignment is the ABSOLUTE left so the
-/// glyphs start at x = 0 whatever the direction (right-alignment of RTL rows
-/// is a shift applied by the painter, _LinePara.rtlShift — with `start`
-/// alignment an RTL paragraph laid out at _layoutMaxW would sit 16M px away).
-ui.ParagraphStyle _lineParagraphStyle(bool rtl) => ui.ParagraphStyle(
-  fontSize: _fontSize,
-  fontFamily: _monoFont,
-  maxLines: 1,
-  ellipsis: '',
-  textDirection: rtl ? ui.TextDirection.rtl : ui.TextDirection.ltr,
-  textAlign: ui.TextAlign.left,
-);
-
-/// Build one row and apply the syntax-highlight [spans] as colored runs (spans are UTF-16
-/// indices within the row, sorted and non-overlapping). null/empty [spans] → all foreground
-/// color. Measuring (caret/selection) with this Paragraph is also correct (glyph metrics do
-/// not depend on color).
-_LinePara _buildLineStyled(
-  String raw,
-  double maxWidth,
-  List<HlSpan>? spans, {
-  int startColumn = 0,
-  bool? baseRtl,
-}) {
-  final ex = expandTabs(raw, _tabSize, startColumn: startColumn);
-  final text = ex.display;
-  final map = ex.map;
-  final rtl = baseRtl ?? isRtlText(text);
-  final pb = ui.ParagraphBuilder(_lineParagraphStyle(rtl));
-  void run(int a, int b, int style) {
-    if (b <= a) return;
-    final argb = AppSettings.instance.hlColor(
-      style,
-    ); // theme colors, user-editable
-    pb.pushStyle(
-      ui.TextStyle(
-        color: argb != null ? Color(argb) : _fg,
-        fontSize: _fontSize,
-        fontFamily: _monoFont,
-      ),
-    );
-    pb.addText(text.substring(a, b));
-    pb.pop();
-  }
-
-  if (spans == null || spans.isEmpty) {
-    run(0, text.length, Hl.none);
-  } else {
-    var pos = 0;
-    for (final s in spans) {
-      // Spans are in raw row indices; the paragraph holds the expanded text.
-      final ra = s.start < 0
-          ? 0
-          : (s.start > raw.length ? raw.length : s.start);
-      final rb = s.end < ra ? ra : (s.end > raw.length ? raw.length : s.end);
-      final a = map[ra], b = map[rb];
-      if (a > pos) run(pos, a, Hl.none);
-      run(a, b, s.style);
-      pos = b;
-    }
-    if (pos < text.length) run(pos, text.length, Hl.none);
-  }
-  return _LinePara(
-    pb.build()..layout(ui.ParagraphConstraints(width: maxWidth)),
-    ex.map,
-    rtl: rtl,
-  );
-}
-
-// byte<->char within a row goes through WrapRow.charOfByte / byteOfChar,
-// backed by the per-line maps the document's codec produced at decode time
-// (exact for any encoding, including malformed bytes).
-
-/// Self-painted text viewport (LeafRenderObjectWidget). Pure painting: draws the [window]
-/// the widget supplies plus caret/selection, and does no IO inside paint (scrolling / loading /
-/// caret movement are driven by the outer State).
-class TextViewport extends LeafRenderObjectWidget {
-  const TextViewport({
-    super.key,
-    required this.window,
-    required this.rows,
-    required this.rowSpans,
-    required this.anchorLine,
-    required this.anchorOffset,
-    required this.totalBytes,
-    required this.caretOffset,
-    required this.caretAtRowEnd,
-    required this.smartWord,
-    required this.selStart,
-    required this.selEnd,
-    required this.block,
-    required this.caretOn,
-    this.caretFocused = true,
-    required this.composing,
-    required this.spans,
-    required this.scrollX,
-    required this.contentW,
-    this.rtlMode = 1,
-    required this.settingsEpoch,
-    required this.bookmarks,
-    required this.brackets,
-    required this.extraCarets,
-    required this.extraSels,
-    required this.foldable,
-    required this.folded,
-    required this.dropCaret,
-  });
-
-  /// Drop indicator while the selection is being dragged (null = none).
-  final int? dropCaret;
-
-  /// Code folding: line-start offsets that have a fold region (gutter
-  /// chevron) and those currently collapsed (`⋯` after the header line).
-  /// Immutable snapshots, fresh on change.
-  final Set<int> foldable;
-  final Set<int> folded;
-
-  final DocWindow? window;
-
-  /// Visible "visual rows": soft wrap splits each logical line into several rows (with
-  /// wrapping off, one line = one row).
-  final List<WrapRow> rows;
-
-  /// Syntax spans per visual row (aligned with [rows], already cut to row coordinates).
-  final List<List<HlSpan>> rowSpans;
-  final int anchorLine; // line number of the top line, -1 = unknown
-  final int anchorOffset; // byte offset of the top line (for the scrollbar)
-  final int totalBytes;
-  final int caretOffset; // caret's document byte offset; -1 = not shown
-  // Caret exactly on a wrap cut belongs to the row before it (End key).
-  final bool caretAtRowEnd;
-
-  // The selected whole word, whose other occurrences get backlit; null = none.
-  final String? smartWord;
-  final int selStart; // selection start (document offset); selStart==selEnd = no selection
-  final int selEnd;
-
-  /// Column mode's rectangular selection; non-null replaces the linear [selStart]..[selEnd] one.
-  final ColumnBlock? block;
-  final bool caretOn; // blink phase (caret drawn only when true)
-  /// False while the editor lacks keyboard focus or the window is inactive:
-  /// the caret is then drawn steady (no blink) and dimmed, so the position
-  /// stays visible but the user can tell typing would not land here.
-  final bool caretFocused;
-  final String composing; // IME text being composed (drawn at the caret, underlined)
-  final List<List<HlSpan>>? spans; // syntax spans per visible line (aligned with window.lines)
-  final double scrollX; // horizontal scroll offset (px; text layer shifts left, gutter stays fixed)
-  final double contentW; // max content width of the visible lines (for the horizontal scrollbar)
-
-  /// How rows are horizontally aligned (see _EditorViewState._rtlMode):
-  /// 0 = every row at the left origin (column mode), 1 = per-row (an RTL row
-  /// narrower than the text area is right-aligned inside it), 2 = document
-  /// RTL layout (EVERY row right-aligned to the common right edge
-  /// max(text area, contentW), so line starts line up and the horizontal
-  /// scroll origin is effectively on the right).
-  final int rtlMode;
-  final int settingsEpoch; // bumped when AppSettings changes → forces a repaint
-
-  /// Bookmarked line-start byte offsets (gutter dots). An IMMUTABLE snapshot:
-  /// the view hands over a fresh set on every change so the identical-check
-  /// in the setter can detect it.
-  final Set<int> bookmarks;
-
-  /// Matched bracket pair to highlight (0 or 2 byte offsets; fresh list on
-  /// every change, same identical-check contract as [bookmarks]).
-  final List<int> brackets;
-
-  /// Multi-cursor: the extra carets' byte offsets (sorted) and their
-  /// selections as flat [start, end, …] pairs. Fresh lists on change.
-  final List<int> extraCarets;
-  final List<int> extraSels;
-
-  @override
-  RenderTextViewport createRenderObject(BuildContext context) =>
-      RenderTextViewport(
-        window: window,
-        rows: rows,
-        rowSpans: rowSpans,
-        anchorLine: anchorLine,
-        anchorOffset: anchorOffset,
-        totalBytes: totalBytes,
-        caretOffset: caretOffset,
-        caretAtRowEnd: caretAtRowEnd,
-        smartWord: smartWord,
-        selStart: selStart,
-        selEnd: selEnd,
-        block: block,
-        caretOn: caretOn,
-        caretFocused: caretFocused,
-        composing: composing,
-        spans: spans,
-        scrollX: scrollX,
-        contentW: contentW,
-        rtlMode: rtlMode,
-        settingsEpoch: settingsEpoch,
-        bookmarks: bookmarks,
-        brackets: brackets,
-        extraCarets: extraCarets,
-        extraSels: extraSels,
-        foldable: foldable,
-        folded: folded,
-        dropCaret: dropCaret,
-      );
-
-  @override
-  void updateRenderObject(
-    BuildContext context,
-    RenderTextViewport renderObject,
-  ) {
-    renderObject
-      ..window = window
-      ..rows = rows
-      ..rowSpans = rowSpans
-      ..anchorLine = anchorLine
-      ..anchorOffset = anchorOffset
-      ..totalBytes = totalBytes
-      ..caretOffset = caretOffset
-      ..caretAtRowEnd = caretAtRowEnd
-      ..smartWord = smartWord
-      ..selStart = selStart
-      ..selEnd = selEnd
-      ..block = block
-      ..caretOn = caretOn
-      ..caretFocused = caretFocused
-      ..composing = composing
-      ..spans = spans
-      ..scrollX = scrollX
-      ..contentW = contentW
-      ..rtlMode = rtlMode
-      ..settingsEpoch = settingsEpoch
-      ..bookmarks = bookmarks
-      ..brackets = brackets
-      ..extraCarets = extraCarets
-      ..extraSels = extraSels
-      ..foldable = foldable
-      ..folded = folded
-      ..dropCaret = dropCaret;
-  }
-}
-
-/// Custom RenderBox that paints only the visible lines: line numbers + text + selection
-/// highlight + caret + byte-proportional scrollbar.
-class RenderTextViewport extends RenderBox {
-  RenderTextViewport({
-    required this._window,
-    required this._rows,
-    required this._rowSpans,
-    required this._anchorLine,
-    required this._anchorOffset,
-    required this._totalBytes,
-    required this._caretOffset,
-    required this._caretAtRowEnd,
-    required this._smartWord,
-    required this._selStart,
-    required this._selEnd,
-    required this._block,
-    required this._caretOn,
-    required this._caretFocused,
-    required this._composing,
-    required this._spans,
-    required this._scrollX,
-    required this._contentW,
-    required this._rtlMode,
-    required this._settingsEpoch,
-    required this._bookmarks,
-    required this._brackets,
-    required this._extraCarets,
-    required this._extraSels,
-    required this._foldable,
-    required this._folded,
-    required this._dropCaret,
-  });
-
-  int? _dropCaret;
-  set dropCaret(int? v) {
-    if (v == _dropCaret) return;
-    _dropCaret = v;
-    markNeedsPaint();
-  }
-
-  // Column mode, a caret column past the end of [line]: the x distance from
-  // the character at byte [within] to the block's [caretCol], counted in
-  // cells of the (monospace) font — 0 when the column is inside the line.
-  double _virtualColumnGap(String line, int within, WrapRow row, int caretCol) {
-    final ci = row.charOfByte(within);
-    final have = columnForCharIndex(line, ci, tabSize: _tabSize);
-    final gap = caretCol - have;
-    return gap > 0 ? gap * editorCharWidth : 0;
-  }
-
-  Set<int> _foldable;
-  set foldable(Set<int> v) {
-    if (identical(v, _foldable)) return;
-    _foldable = v;
-    markNeedsPaint();
-  }
-
-  Set<int> _folded;
-  set folded(Set<int> v) {
-    if (identical(v, _folded)) return;
-    _folded = v;
-    markNeedsPaint();
-  }
-
-  List<int> _extraCarets;
-  set extraCarets(List<int> v) {
-    if (identical(v, _extraCarets)) return;
-    _extraCarets = v;
-    markNeedsPaint();
-  }
-
-  List<int> _extraSels;
-  set extraSels(List<int> v) {
-    if (identical(v, _extraSels)) return;
-    _extraSels = v;
-    markNeedsPaint();
-  }
-
-  Set<int> _bookmarks;
-  set bookmarks(Set<int> v) {
-    if (identical(v, _bookmarks)) return;
-    _bookmarks = v;
-    markNeedsPaint();
-  }
-
-  List<int> _brackets;
-  set brackets(List<int> v) {
-    if (identical(v, _brackets)) return;
-    _brackets = v;
-    markNeedsPaint();
-  }
-
-  DocWindow? _window;
-  set window(DocWindow? v) {
-    if (identical(v, _window)) return;
-    _window = v;
-    markNeedsPaint();
-  }
-
-  List<WrapRow> _rows;
-  set rows(List<WrapRow> v) {
-    if (identical(v, _rows)) return;
-    _rows = v;
-    markNeedsPaint();
-  }
-
-  List<List<HlSpan>> _rowSpans;
-  set rowSpans(List<List<HlSpan>> v) {
-    if (identical(v, _rowSpans)) return;
-    _rowSpans = v;
-    markNeedsPaint();
-  }
-
-  int _anchorLine;
-  set anchorLine(int v) {
-    if (v == _anchorLine) return;
-    _anchorLine = v;
-    markNeedsPaint();
-  }
-
-  int _anchorOffset;
-  set anchorOffset(int v) {
-    if (v == _anchorOffset) return;
-    _anchorOffset = v;
-    markNeedsPaint();
-  }
-
-  int _totalBytes;
-  set totalBytes(int v) {
-    if (v == _totalBytes) return;
-    _totalBytes = v;
-    markNeedsPaint();
-  }
-
-  int _caretOffset;
-  set caretOffset(int v) {
-    if (v == _caretOffset) return;
-    _caretOffset = v;
-    markNeedsPaint();
-  }
-
-  bool _caretAtRowEnd;
-  set caretAtRowEnd(bool v) {
-    if (v == _caretAtRowEnd) return;
-    _caretAtRowEnd = v;
-    markNeedsPaint();
-  }
-
-  String? _smartWord;
-  set smartWord(String? v) {
-    if (v == _smartWord) return;
-    _smartWord = v;
-    markNeedsPaint();
-  }
-
-  int _selStart;
-  set selStart(int v) {
-    if (v == _selStart) return;
-    _selStart = v;
-    markNeedsPaint();
-  }
-
-  int _selEnd;
-  set selEnd(int v) {
-    if (v == _selEnd) return;
-    _selEnd = v;
-    markNeedsPaint();
-  }
-
-  ColumnBlock? _block;
-  set block(ColumnBlock? v) {
-    if (v == _block) return;
-    _block = v;
-    markNeedsPaint();
-  }
-
-  bool _caretOn;
-  set caretOn(bool v) {
-    if (v == _caretOn) return;
-    _caretOn = v;
-    markNeedsPaint();
-  }
-
-  bool _caretFocused;
-  set caretFocused(bool v) {
-    if (v == _caretFocused) return;
-    _caretFocused = v;
-    markNeedsPaint();
-  }
-
-  // Caret paint: full color while focused, dimmed (steady) otherwise.
-  Color get _caretPaintColor =>
-      _caretFocused ? _caretColor : _caretColor.withValues(alpha: 0.45);
-
-  String _composing;
-  set composing(String v) {
-    if (v == _composing) return;
-    _composing = v;
-    markNeedsPaint();
-  }
-
-  List<List<HlSpan>>? _spans;
-  set spans(List<List<HlSpan>>? v) {
-    if (identical(v, _spans)) return;
-    _spans = v;
-    markNeedsPaint();
-  }
-
-  double _scrollX;
-  set scrollX(double v) {
-    if (v == _scrollX) return;
-    _scrollX = v;
-    markNeedsPaint();
-  }
-
-  double _contentW;
-  set contentW(double v) {
-    if (v == _contentW) return;
-    _contentW = v;
-    markNeedsPaint();
-  }
-
-  int _rtlMode;
-  set rtlMode(int v) {
-    if (v == _rtlMode) return;
-    _rtlMode = v;
-    markNeedsPaint();
-  }
-
-  /// Horizontal shift of a row's text origin inside a text area [areaW]
-  /// wide — the painter's twin of _EditorViewState._rowShift; both must
-  /// agree or clicks miss the drawn glyphs.
-  double _rowShiftOf(_LinePara para, double areaW) => switch (_rtlMode) {
-    0 => 0,
-    2 => rtlLayoutShift(para.width, areaW, _contentW),
-    _ => para.rtlShift(areaW),
-  };
-
-  // Not painted directly: font/colors/metrics are read from AppSettings at paint time, so this is
-  // what tells the render object that those changed.
-  int _settingsEpoch;
-  set settingsEpoch(int v) {
-    if (v == _settingsEpoch) return;
-    _settingsEpoch = v;
-    markNeedsPaint();
-  }
-
-  @override
-  bool get isRepaintBoundary => true;
-
-  @override
-  bool get sizedByParent => true;
-
-  @override
-  Size computeDryLayout(BoxConstraints constraints) => constraints.biggest;
-
-  double get _gutterWidth =>
-      _gutterWidthFor(_anchorLine, _window?.lines.length ?? 0);
-
-  @override
-  void paint(PaintingContext context, Offset offset) {
-    // Diagnostic timer around the whole paint (paragraph building happens
-    // here, so a font that is slow to resolve shows up as a slow paint).
-    final sw = Stopwatch()..start();
-    try {
-      _paintBody(context, offset);
-    } finally {
-      _slow('paint text viewport (${_rows.length} rows)', sw);
-    }
-  }
-
-  void _paintBody(PaintingContext context, Offset offset) {
-    final canvas = context.canvas;
-    canvas.save();
-    canvas.clipRect(offset & size);
-    canvas.drawRect(offset & size, Paint()..color = _bg);
-
-    final gw = _gutterWidth;
-    canvas.drawRect(
-      Rect.fromLTWH(offset.dx, offset.dy, gw, size.height),
-      Paint()..color = _gutterBg,
-    );
-
-    final win = _window;
-    if (win != null) {
-      final textX = offset.dx + gw + _gutterPad;
-      // Text area width: an RTL row narrower than this is drawn right-aligned
-      // (rowX below); in document RTL layout every row is. Column mode
-      // (rtlMode 0) keeps every row at the left origin — its rectangle math
-      // assumes x grows with the character index.
-      // Must equal the state's _textViewW: same subtraction.
-      final areaW = _rtlMode == 0
-          ? 0.0
-          : size.width - gw - _gutterPad - _scrollbarMargin;
-      final blk = _block;
-      final hasSel = blk == null && _selEnd > _selStart;
-      final maxRows = (size.height / _lineHeight).ceil() + 1;
-      final rows = _rows.length < maxRows ? _rows.length : maxRows;
-
-      // Text layer (selection / text / caret): horizontal scrolling is done by clipping to
-      // the text area and translating the canvas left. The gutter and scrollbars are not in
-      // this layer and stay fixed.
-      canvas.save();
-      canvas.clipRect(
-        Rect.fromLTWH(offset.dx + gw, offset.dy, size.width - gw, size.height),
-      );
-      canvas.translate(-_scrollX, 0);
-      // Current-line highlight: the caret's visual row only. First matching
-      // row wins — at a wrap boundary the caret offset satisfies both the end
-      // of one row and the start of the next.
-      var currentLinePainted = false;
-      var lineStart = -1; // start offset of the logical line being painted
-      for (var i = 0; i < rows; i++) {
-        final y = offset.dy + i * _lineHeight;
-        final row = _rows[i];
-        final line = row.text;
-        final rowStart = row.offset;
-        if (row.isFirst) lineStart = rowStart;
-        // The next row's start is this row's end (the last row uses the window's end).
-        final rowEnd = i + 1 < _rows.length
-            ? _rows[i + 1].offset
-            : win.nextOffset;
-        final contentBytes = row.contentBytes;
-        final rowSpans = i < _rowSpans.length ? _rowSpans[i] : null;
-        final para = _buildLineStyled(
-          line,
-          _layoutMaxW,
-          rowSpans,
-          startColumn: _rowStartColumn(win, row),
-          baseRtl: _rtlMode == 2 ? true : null,
-        );
-        // This row's text origin: textX, plus the right-alignment shift of
-        // an RTL row (or of every row in document RTL layout). Everything
-        // drawn from the paragraph's x uses rowX.
-        final rowX = textX + _rowShiftOf(para, areaW);
-
-        // Current-line backdrop (beneath selection and text): full visible
-        // width — the canvas is shifted by -_scrollX, so shift back.
-        // A caret exactly on a wrap cut belongs to the row the cut starts
-        // (matching _rowIndexOf), so a non-last row owns only cw < content —
-        // unless End parked it there (_caretAtRowEnd), when the row before
-        // the cut owns it and the row starting at the cut must not.
-        final cwHl = _caretOffset - rowStart;
-        final ownedByPrev = _caretAtRowEnd && cwHl == 0 && !row.isFirst;
-        final caretOnRow =
-            _caretOffset >= 0 &&
-            cwHl >= 0 &&
-            !ownedByPrev &&
-            (row.isLast
-                ? cwHl <= contentBytes
-                : cwHl < contentBytes ||
-                      (_caretAtRowEnd && cwHl == contentBytes));
-        if (!currentLinePainted && caretOnRow) {
-          currentLinePainted = true;
-          canvas.drawRect(
-            Rect.fromLTWH(
-              offset.dx + gw + _scrollX,
-              y,
-              size.width - gw,
-              _lineHeight,
-            ),
-            Paint()..color = _currentLineColor,
-          );
-        }
-
-        // Selection highlight (drawn beneath the text)
-        void paintSel(int selStart, int selEnd) {
-          if (selEnd <= rowStart || selStart >= rowEnd) return;
-          final sB = (selStart - rowStart).clamp(0, contentBytes);
-          // If the selection crosses the line's newline, the highlight extends to the end of
-          // the content (plus a small block showing the newline is selected).
-          final selPastEol = row.isLast && selEnd > rowStart + contentBytes;
-          final eB = selPastEol
-              ? contentBytes
-              : (selEnd - rowStart).clamp(0, contentBytes);
-          final sc = row.charOfByte(sB);
-          final ec = row.charOfByte(eB);
-          final paint = Paint()..color = _selColor;
-          if (ec > sc) {
-            for (final b in para.boxes(sc, ec)) {
-              canvas.drawRect(
-                Rect.fromLTWH(rowX +b.left, y, b.right - b.left, _lineHeight),
-                paint,
-              );
-            }
-          }
-          if (selPastEol) {
-            // Newline selected: add a small block at the end of the line
-            final endX = rowX +para.xOf(row.charOfByte(contentBytes));
-            canvas.drawRect(
-              Rect.fromLTWH(endX, y, _fontSize * 0.4, _lineHeight),
-              paint,
-            );
-          }
-        }
-
-        if (hasSel) paintSel(_selStart, _selEnd);
-        // Multi-cursor: the extra cursors' selections, same look.
-        for (var k = 0; k + 1 < _extraSels.length; k += 2) {
-          paintSel(_extraSels[k], _extraSels[k + 1]);
-        }
-
-        // Rectangular (column) selection highlight: each row takes its own slice; a short
-        // line is highlighted only up to its end. Column mode never wraps, so row.offset is
-        // the start of the logical line.
-        if (blk != null) {
-          final slice = sliceLine(blk, rowStart, line, map: row.map, tabSize: _tabSize);
-          if (slice != null && !slice.isEmpty) {
-            final paint = Paint()..color = _selColor;
-            for (final box in para.boxes(slice.startChar, slice.endChar)) {
-              canvas.drawRect(
-                Rect.fromLTWH(
-                  rowX +box.left,
-                  y,
-                  box.right - box.left,
-                  _lineHeight,
-                ),
-                paint,
-              );
-            }
-          }
-        }
-
-        // Matching-bracket highlight (beneath the text: fill + thin outline)
-        for (final b in _brackets) {
-          final rel = b - rowStart;
-          if (rel >= 0 && rel < contentBytes) {
-            final sc = row.charOfByte(rel);
-            for (final box in para.boxes(sc, sc + 1)) {
-              final r = Rect.fromLTWH(
-                rowX +box.left,
-                y,
-                box.right - box.left,
-                _lineHeight,
-              );
-              canvas.drawRect(r, Paint()..color = _selColor);
-              canvas.drawRect(
-                r.deflate(0.5),
-                Paint()
-                  ..style = PaintingStyle.stroke
-                  ..strokeWidth = 1
-                  ..color = _fg,
-              );
-            }
-          }
-        }
-
-        // Same-word highlight: the other whole-word occurrences of the
-        // selected word (the selection itself already has its own color).
-        final sw = _smartWord;
-        if (sw != null && sw.isNotEmpty) {
-          final paint = Paint()..color = _selColor.withValues(alpha: 0.45);
-          var from = 0;
-          while (true) {
-            final idx = line.indexOf(sw, from);
-            if (idx < 0) break;
-            final end = idx + sw.length;
-            from = end;
-            final whole =
-                (idx == 0 || !_isWordCharAt(line, idx - 1)) &&
-                (end >= line.length || !_isWordCharAt(line, end));
-            if (!whole) continue;
-            if (rowStart + row.byteOfChar(idx) == _selStart) continue;
-            for (final b in para.boxes(idx, end)) {
-              canvas.drawRect(
-                Rect.fromLTWH(rowX +b.left, y, b.right - b.left, _lineHeight),
-                paint,
-              );
-            }
-          }
-        }
-
-        // Indent guides: a faint line at each indent level inside the line's
-        // leading whitespace (View → Indent guides).
-        if (AppSettings.instance.indentGuides && row.isFirst) {
-          var i = 0;
-          while (i < line.length &&
-              (line.codeUnitAt(i) == 0x20 || line.codeUnitAt(i) == 0x09)) {
-            i++;
-          }
-          if (i > 0) {
-            final cols = displayColumn(line.substring(0, i), _tabSize);
-            final cw = editorCharWidth;
-            final paint = Paint()
-              ..color = _fg.withValues(alpha: 0.2)
-              ..strokeWidth = 1;
-            for (var c = 0; c < cols; c += _tabSize) {
-              final x = rowX +c * cw + 0.5;
-              canvas.drawLine(Offset(x, y), Offset(x, y + _lineHeight), paint);
-            }
-          }
-        }
-
-        // Whitespace marks, three independent toggles (View → Show spaces /
-        // tabs / line endings): · for a space, → across a tab, ¶ after a
-        // line's content. Only the visible stretch of a row.
-        final ws = AppSettings.instance;
-        if (ws.showWhitespace) {
-          final wsColor = Color(ws.whitespaceArgb);
-          final paint = Paint()
-            ..color = wsColor
-            ..strokeWidth = 1;
-          if (ws.showSpaces || ws.showTabs) {
-            // Visible stretch in paragraph x (the row may be shifted right;
-            // an RTL paragraph maps x to indices in reverse, so order them).
-            final sx0 = _scrollX - (rowX - textX);
-            final ca = para.charAt(sx0), cb = para.charAt(sx0 + size.width);
-            var c0 = (ca < cb ? ca : cb) - 1;
-            if (c0 < 0) c0 = 0;
-            var c1 = (ca < cb ? cb : ca) + 1;
-            if (c1 > line.length) c1 = line.length;
-            final cy = y + _lineHeight / 2;
-            for (var ci = c0; ci < c1; ci++) {
-              final u = line.codeUnitAt(ci);
-              final space = u == 0x20 && ws.showSpaces;
-              final tab = u == 0x09 && ws.showTabs;
-              if (!space && !tab) continue;
-              final bx = para.boxes(ci, ci + 1);
-              if (bx.isEmpty) continue;
-              final l = rowX +bx.first.left, r = rowX +bx.last.right;
-              if (space) {
-                canvas.drawCircle(Offset((l + r) / 2, cy), 1.2, paint);
-              } else if (r - l > 6) {
-                final x1 = l + 2, x2 = r - 2;
-                canvas.drawLine(Offset(x1, cy), Offset(x2, cy), paint);
-                canvas.drawLine(Offset(x2 - 3, cy - 3), Offset(x2, cy), paint);
-                canvas.drawLine(Offset(x2 - 3, cy + 3), Offset(x2, cy), paint);
-              }
-            }
-          }
-          if (ws.showNewlines &&
-              row.isLast &&
-              rowEnd > rowStart + contentBytes) {
-            final eol = _buildLine('¶', _layoutMaxW, wsColor);
-            canvas.drawParagraph(
-              eol.para,
-              Offset(
-                rowX +para.xOf(line.length),
-                y + (_lineHeight - eol.height) / 2,
-              ),
-            );
-          }
-        }
-
-        // Text
-        canvas.drawParagraph(
-          para.para,
-          Offset(rowX, y + (_lineHeight - para.height) / 2),
-        );
-        // Collapsed fold: a `⋯` badge after the header's text.
-        if (row.isLast && lineStart >= 0 && _folded.contains(lineStart)) {
-          // Past the ¶ end-of-line mark when line-end marks are shown.
-          final eolGap = AppSettings.instance.showNewlines
-              ? editorCharWidth * 1.5
-              : 0.0;
-          final bx = rowX +para.xOf(line.length) + 6 + eolGap;
-          final badge = _buildLine(' ⋯ ', _layoutMaxW, _fg);
-          final r = Rect.fromLTWH(bx, y + 2, badge.width + 2, _lineHeight - 4);
-          canvas.drawRRect(
-            RRect.fromRectAndRadius(r, const Radius.circular(3)),
-            Paint()..color = _fg.withValues(alpha: 0.15),
-          );
-          canvas.drawRRect(
-            RRect.fromRectAndRadius(r, const Radius.circular(3)),
-            Paint()
-              ..style = PaintingStyle.stroke
-              ..strokeWidth = 1
-              ..color = _fg.withValues(alpha: 0.4),
-          );
-          canvas.drawParagraph(
-            badge.para,
-            Offset(bx + 1, y + (_lineHeight - badge.height) / 2),
-          );
-        }
-
-        // Caret (+ IME composition overlay)
-        final cw = _caretOffset - rowStart;
-        if (caretOnRow) {
-          var cx = rowX +para.xOf(row.charOfByte(cw));
-          // Column mode: the block's caret column may lie past this line's
-          // end (the caret offset itself cannot). Draw it out in virtual
-          // space, one cell per missing column, instead of at the line end.
-          if (blk != null && rowStart == blk.caretLine) {
-            cx += _virtualColumnGap(line, cw, row, blk.caretCol);
-          }
-          if (_composing.isNotEmpty) {
-            // Text being composed is drawn at the caret, underlined (not yet in the document)
-            final cp = _buildLine(_composing, _layoutMaxW, _fg);
-            canvas.drawParagraph(
-              cp.para,
-              Offset(cx, y + (_lineHeight - cp.height) / 2),
-            );
-            final cwid = cp.width;
-            canvas.drawRect(
-              Rect.fromLTWH(cx, y + _lineHeight - 2, cwid, 1),
-              Paint()..color = _fg,
-            );
-            cx += cwid;
-          }
-          if (_caretOn) {
-            canvas.drawRect(
-              Rect.fromLTWH(cx, y + 1, 2, _lineHeight - 2),
-              Paint()..color = _caretPaintColor,
-            );
-          }
-        }
-        // Drop indicator (selection being dragged): a steady, slightly
-        // wider caret at the pointer — no blink, so it never vanishes
-        // while the user is aiming.
-        final drop = _dropCaret;
-        if (drop != null) {
-          final rel = drop - rowStart;
-          final onRow =
-              rel >= 0 &&
-              (row.isLast ? rel <= contentBytes : rel < contentBytes);
-          if (onRow) {
-            final dx = rowX +para.xOf(row.charOfByte(rel));
-            canvas.drawRect(
-              Rect.fromLTWH(dx - 1, y + 1, 3, _lineHeight - 2),
-              Paint()..color = _caretColor.withValues(alpha: 0.7),
-            );
-          }
-        }
-        // Multi-cursor: the extra carets on this row (sorted list → the
-        // slice that falls inside the row; no wrap-cut affinity for them).
-        if (_caretOn && _extraCarets.isNotEmpty) {
-          final lo = rowStart, hi = rowStart + contentBytes;
-          var k = _lowerBound(_extraCarets, lo);
-          for (; k < _extraCarets.length; k++) {
-            final rel = _extraCarets[k] - rowStart;
-            if (row.isLast ? rel > contentBytes : rel >= contentBytes) break;
-            if (_extraCarets[k] > hi) break;
-            final cx = rowX +para.xOf(row.charOfByte(rel));
-            canvas.drawRect(
-              Rect.fromLTWH(cx, y + 1, 2, _lineHeight - 2),
-              Paint()..color = _caretPaintColor,
-            );
-          }
-        }
-        // Column mode: one caret per line of the block at the caret-side
-        // column, like multi-cursor — a zero-width block after typing then
-        // looks like the N cursors it acts as. The caret line itself already
-        // has the primary caret. On a line shorter than the caret column the
-        // caret sits in virtual space past the end (one cell per column).
-        if (_caretOn &&
-            blk != null &&
-            row.isFirst &&
-            rowStart != blk.caretLine &&
-            rowStart >= blk.topLine &&
-            rowStart <= blk.bottomLine) {
-          final ci = charIndexForColumn(line, blk.caretCol, tabSize: _tabSize);
-          final cx =
-              textX +
-              para.xOf(ci) +
-              _virtualColumnGap(line, row.byteOfChar(ci), row, blk.caretCol);
-          canvas.drawRect(
-            Rect.fromLTWH(cx, y + 1, 2, _lineHeight - 2),
-            Paint()..color = _caretPaintColor,
-          );
-        }
-      }
-      canvas.restore(); // end of the text layer's clip/translate
-
-      // Line numbers (fixed column, not horizontally scrolled)
-      for (var i = 0; i < rows; i++) {
-        final row = _rows[i];
-        // Folded windows are not contiguous: the window carries each line's
-        // absolute number (lineNumberAt) — never assume anchor + index.
-        final lineNo = row.isFirst
-            ? (win.lineNumbers != null
-                  ? win.lineNumberAt(row.lineIndex)
-                  : (_anchorLine >= 0 ? _anchorLine + row.lineIndex : -1))
-            : -1;
-        _paintRight(
-          canvas,
-          // Continuation rows of a wrapped line get no number (a · placeholder), so the
-          // numbers line up with the real lines.
-          lineNo >= 0 ? '${lineNo + 1}' : '·',
-          offset.dx + _gutterPad,
-          offset.dy + i * _lineHeight,
-          gw - _gutterPad * 2 - (_foldable.isEmpty ? 0 : 10),
-        );
-        // Fold chevron at the gutter's right edge: ▾ open, ▸ collapsed.
-        if (row.isFirst && _foldable.contains(row.offset)) {
-          final cx = offset.dx + gw - 8;
-          final cy = offset.dy + (i + 0.5) * _lineHeight;
-          final p = Path();
-          if (_folded.contains(row.offset)) {
-            p
-              ..moveTo(cx - 2, cy - 4)
-              ..lineTo(cx + 3, cy)
-              ..lineTo(cx - 2, cy + 4);
-          } else {
-            p
-              ..moveTo(cx - 4, cy - 2)
-              ..lineTo(cx, cy + 3)
-              ..lineTo(cx + 4, cy - 2);
-          }
-          p.close();
-          canvas.drawPath(p, Paint()..color = _gutterFg);
-        }
-        // Bookmark dot at the gutter's left edge (line-start rows only).
-        if (row.isFirst && _bookmarks.contains(row.offset)) {
-          canvas.drawCircle(
-            Offset(offset.dx + 5, offset.dy + (i + 0.5) * _lineHeight),
-            3,
-            Paint()..color = _selColor.withValues(alpha: 1),
-          );
-        }
-      }
-    }
-
-    _paintScrollbar(canvas, offset);
-    _paintHScrollbar(canvas, offset);
-    canvas.restore();
-  }
-
-  // Paint right-aligned line-number text.
-  void _paintRight(
-    Canvas canvas,
-    String text,
-    double x,
-    double y,
-    double maxWidth,
-  ) {
-    final p = _buildLine(text, maxWidth.clamp(0.0, 1048576.0), _gutterFg);
-    // Right-align: shift by maxWidth - text width
-    final tw = p.width;
-    canvas.drawParagraph(
-      p.para,
-      Offset(
-        x + (maxWidth - tw).clamp(0.0, maxWidth),
-        y + (_lineHeight - p.height) / 2,
-      ),
-    );
-  }
-
-  // Byte-proportional scrollbar (needs no total line count)
-  void _paintScrollbar(Canvas canvas, Offset offset) {
-    if (_totalBytes <= 0) return;
-    const w = 8.0;
-    final trackH = size.height;
-    if (trackH <= 24.0) return; // viewport smaller than the min thumb
-
-    // Estimate the thumb height from the byte fraction the window roughly covers (min 24px)
-    final approxView = (size.height / _lineHeight) * 80; // approximate bytes in the window
-    final thumbH = (approxView / _totalBytes * trackH).clamp(24.0, trackH);
-    final t = (_anchorOffset / _totalBytes).clamp(0.0, 1.0).toDouble();
-    final thumbY = offset.dy + t * (trackH - thumbH);
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        Rect.fromLTWH(offset.dx + size.width - w - 2, thumbY, w, thumbH),
-        const Radius.circular(4),
-      ),
-      Paint()..color = _thumb,
-    );
-  }
-
-  // Bottom horizontal scrollbar (drawn only when the widest visible line exceeds the text area)
-  void _paintHScrollbar(Canvas canvas, Offset offset) {
-    final gw = _gutterWidth;
-    final viewW = size.width - gw - _gutterPad - _scrollbarMargin;
-    if (_contentW <= viewW || viewW <= 0) return;
-    const h = 8.0;
-    final trackX = offset.dx + gw;
-    final trackW = size.width - gw - _scrollbarMargin;
-    if (trackW <= 24.0) return; // viewport narrower than the min thumb
-    final thumbW = (viewW / _contentW * trackW).clamp(24.0, trackW);
-    final t = (_scrollX / (_contentW - viewW)).clamp(0.0, 1.0);
-    final x = trackX + t * (trackW - thumbW);
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        Rect.fromLTWH(x, offset.dy + size.height - h - 2, thumbW, h),
-        const Radius.circular(4),
-      ),
-      Paint()..color = _thumb,
-    );
-  }
 }
 
 /// Connects an [EditorView] to the outer shell: the shell drives the current editor through
@@ -1481,8 +302,12 @@ class EditorController extends ChangeNotifier {
 
   /// Soft wrap of this pane: the effective mode ('off'/'columns'/'window'),
   /// the per-tab override (null = follows the global default), and setters.
-  String get wrapMode => _view?.wrapSetting ?? AppSettings.instance.softWrapMode;
+  String get wrapMode =>
+      _view?.wrapSetting ?? AppSettings.instance.softWrapMode;
   String? get wrapOverride => _view?._wrapOverride;
+
+  /// This tab's quick-zoom factor (1 = the font dialog's size).
+  double get zoom => _view?._zoom ?? 1;
   void setWrapMode(String mode) => _view?._setWrapOverride(mode);
   void toggleWrap() => _view?._toggleWrap();
 
@@ -1507,6 +332,14 @@ class EditorController extends ChangeNotifier {
     if (h is RustHighlighter) return h.lang;
     if (h is SimpleHighlighter) return h.label.isEmpty ? null : h.label;
     return null;
+  }
+
+  /// The pure-Dart lexer fell back to highlight.json's "default" rules (no
+  /// language claims the extension); [effectiveSyntax] is then just the
+  /// extension and must not be shown as a language name.
+  bool get effectiveSyntaxIsDefault {
+    final h = _view?._hl;
+    return h is SimpleHighlighter && h.isDefault;
   }
 
   // ── Exposed operations (forwarded to the current EditorView; no-op without a view) ──
@@ -1605,6 +438,15 @@ class EditorController extends ChangeNotifier {
   int get caretOffset => _view?._caretOffset ?? 0;
   int get anchorOffset => _view?._anchorOffset ?? 0;
 
+  /// Stream the document's bytes to [path] (the untitled-tab stash written
+  /// when the session is saved). Queued like the other save-like operations,
+  /// so typing during the write lands in the document afterwards.
+  Future<void> stashTo(String path) {
+    final v = _view;
+    if (v == null || v._doc == null) return Future.value();
+    return v._runQueued(() => v._stashTo(path));
+  }
+
   /// Linear selection [start, end) or null (printing).
   (int, int)? get selection {
     final v = _view;
@@ -1642,6 +484,13 @@ class EditorController extends ChangeNotifier {
   /// Shell menu actions bound to keys (file.saveAll, file.quickOpen, …):
   /// the shell points this at its menu dispatcher.
   void Function(String action)? onMenuAction;
+
+  /// The right-click menu's items (settings/context_menu.json, flat list of
+  /// actions and separators), shared by every pane. The shell sets it after
+  /// loading and while the context menu editor previews a draft; null = not
+  /// loaded (widget tests without the shell) → the editor reads the bundled
+  /// default itself.
+  static List<MenuNode>? contextMenuItems;
 
   /// Run menu / clipboard history / column editor (all dialogs live in the shell).
   VoidCallback? onRunPrompt;
@@ -1731,10 +580,17 @@ class EditorController extends ChangeNotifier {
   /// View → Word count… (statistics dialog; selection-aware).
   void showWordCount() => _view?._showWordCount();
 
+  /// View → Checksums… (hash dialog; selection-aware).
+  void showChecksum() => _view?._showChecksum();
+
+  /// View → Copy Bytes… (C array / hex string dialog; selection-aware).
+  void copyBytes() => _view?._showCopyBytes();
+
   /// Search → Go to matching bracket (ctrl+m).
   void gotoMatchingBracket() => _view?.matchBracket();
 
-  /// View → Zoom in / out / reset (ctrl+= / ctrl+- / ctrl+0; 0 = reset).
+  /// View → Zoom in / out / reset (ctrl+= / ctrl+- / ctrl+0; 0 = reset),
+  /// this tab only.
   void zoomFont(int steps) => _view?.zoomFont(steps);
 }
 
@@ -1754,7 +610,9 @@ class EditorView extends StatefulWidget {
     this.initialEncoding,
     this.initialBookmarks = const [],
     this.initialWrap,
+    this.initialZoom = 1,
     this.startBlank = false,
+    this.initialUntitledStash,
   });
 
   final EditorController controller;
@@ -1778,16 +636,30 @@ class EditorView extends StatefulWidget {
   /// null = follow the global default.
   final String? initialWrap;
 
+  /// Per-tab quick-zoom factor to restore (1 = the font dialog's size).
+  final double initialZoom;
+
   /// With no [initialPath]: true = start with an empty untitled document
   /// (saving asks for a location); false = the legacy "open a file" screen.
   final bool startBlank;
+
+  /// Path of a stashed untitled buffer (`settings/untitled/...`) to load back
+  /// as an untitled, modified document. Takes precedence over [startBlank].
+  final String? initialUntitledStash;
 
   @override
   State<EditorView> createState() => _EditorViewState();
 }
 
 class _EditorViewState extends State<EditorView>
+    with
+        _EditorViewHexMode,
+        _EditorViewBookmarks,
+        _EditorViewNavHistory,
+        _EditorViewCompletion,
+        _EditorViewSearch
     implements EditorActions, DeltaTextInputClient {
+  @override
   Document? _doc;
   DocWindow? _window;
 
@@ -1795,12 +667,18 @@ class _EditorViewState extends State<EditorView>
   /// build from the window / spans / settings.
   List<WrapRow> _rows = const [];
   List<List<HlSpan>> _rowSpans = const [];
-  String _rowsKey = ''; // wrap settings used for the last expansion (mode/columns/view width; recompute on change)
+  String _rowsKey =
+      ''; // wrap settings used for the last expansion (mode/columns/view width; recompute on change)
+  @override
   int _anchorOffset = 0;
   int _anchorLine = 0; // line number of the top line
-  bool _anchorLineExact = true; // whether it is exact (a byte jump into unindexed territory → estimate)
+  bool _anchorLineExact =
+      true; // whether it is exact (a byte jump into unindexed territory → estimate)
+  @override
   double _viewportH = 1;
+  @override
   double _viewportW = 1;
+  @override
   bool _opening = false;
 
   // ── Horizontal scrolling ──
@@ -1828,7 +706,8 @@ class _EditorViewState extends State<EditorView>
     _hScrollFromRight = 0;
   }
 
-  double _contentW = 0; // max content width of the current window's visible lines (measured when the window changes)
+  double _contentW =
+      0; // max content width of the current window's visible lines (measured when the window changes)
   DocWindow? _contentWWin; // the window _contentW was measured for
 
   /// Document-level right-to-left layout (View → Right-to-left layout): every row is
@@ -1912,7 +791,38 @@ class _EditorViewState extends State<EditorView>
   bool _saving = false;
   bool _indexing = false;
   String? _name;
+  @override
   String? _path; // full path of the open file (for saving)
+
+  // Per-file overrides from the nearest .editorconfig. Null means "use the
+  // global setting"; they are re-read whenever a different path is loaded.
+  int? _editorConfigTabSize;
+  bool? _editorConfigInsertSpaces;
+
+  // Same for the save-time transforms (Settings → Advanced → Save behavior).
+  bool? _editorConfigTrimWs;
+  bool? _editorConfigFinalNl;
+
+  int get _tabSize => _editorConfigTabSize ?? AppSettings.instance.tabSize;
+  bool get _insertSpaces =>
+      _editorConfigInsertSpaces ?? AppSettings.instance.insertSpaces;
+
+  bool get _saveTrimWs =>
+      _editorConfigTrimWs ?? AppSettings.instance.saveTrimTrailingWhitespace;
+  bool get _saveFinalNl =>
+      _editorConfigFinalNl ?? AppSettings.instance.saveEnsureFinalNewline;
+
+  /// Wrap a save sink so the enabled save transforms run while the document
+  /// streams out (the buffer keeps its exact bytes; undo restores them).
+  /// Hex mode is excluded: there the view is the bytes themselves.
+  IOSink _saveSink(IOSink inner, Document doc) => saveTransformSink(
+    inner,
+    trimTrailingWhitespace: !_hexMode && _saveTrimWs,
+    ensureFinalNewline: !_hexMode && _saveFinalNl,
+    unitSize: doc.codec.unitSize,
+    littleEndian: doc.codec.littleEndian,
+    newlineBytes: doc.codec.encode(_newline).bytes,
+  );
 
   // ── External change detection ──
   // Disk stamp (mtime/size) as of our last open/save/reload; a later mismatch
@@ -1920,13 +830,20 @@ class _EditorViewState extends State<EditorView>
   int? _diskMtimeUs;
   int? _diskSize;
   bool _extDialogOpen = false; // re-entry guard for the prompt
+  // "Don't ask again" for this file (a log another program keeps appending to):
+  // the stamp still tracks the disk, the prompt never comes back until a
+  // different file is loaded into this pane.
+  bool _extPromptSuppressed = false;
   final _jumpCtrl = TextEditingController();
+  @override
   final _focus = FocusNode();
 
   // ── Caret / selection (phase 3) ──
   int _caretPos = 0; // caret's document byte offset (use _caretOffset)
+  @override
   int get _caretOffset => _caretPos;
   // Any move clears the row-end affinity; End re-sets it via _moveCaretTo.
+  @override
   set _caretOffset(int v) {
     if (v != _caretPos) {
       _caretAtRowEnd = false;
@@ -1943,7 +860,9 @@ class _EditorViewState extends State<EditorView>
   // Selection anchor (null = no selection); the selection is
   // [min, max](anchor, caret). Assigning it — even null — ends select-all.
   int? _selAnchorRaw;
+  @override
   int? get _selAnchor => _selAnchorRaw;
+  @override
   set _selAnchor(int? v) {
     _selAnchorRaw = v;
     _selAll = false;
@@ -1964,6 +883,7 @@ class _EditorViewState extends State<EditorView>
   // (_forEachCursor); a caret move or edit made outside that loop collapses
   // back to the primary — the offsets would be stale anyway.
   List<Cursor> _extra = const [];
+  @override
   bool get _multi => _extra.isNotEmpty;
   bool _inMulti = false; // inside _forEachCursor: the funnels must not collapse
   // Painter snapshots, fresh lists on every change (identical-check contract).
@@ -1971,24 +891,32 @@ class _EditorViewState extends State<EditorView>
   List<int> _extraSelsView = const [];
   bool _caretOn = true; // blink phase
   Timer? _blinkTimer;
-  Future<void> _caretOps = Future<void>.value(); // serializes async caret/edit operations to avoid races
+  Future<void> _caretOps =
+      Future<
+        void
+      >.value(); // serializes async caret/edit operations to avoid races
 
   // ── Editing / input (phase 4) ──
+  @override
   final UndoStack _undo = UndoStack();
 
   /// Cap on bytes the undo history may hold after a save materializes its
   /// entries (deleted text has to be copied out of the closing document).
   static const int _undoRebaseMaxBytes = 256 << 20;
   bool _modified = false;
-  String _newline = '\n'; // this file's newline style (\r\n when \r\n is detected)
+  String _newline =
+      '\n'; // this file's newline style (\r\n when \r\n is detected)
+  @override
   String _composing = ''; // text the IME is composing (shown as an overlay, not yet in the document)
   TextInputConnection? _ime;
   TextEditingValue _imeValue = TextEditingValue.empty;
 
   // ── Syntax highlighting ──
   Highlighter _hl = const NoHighlighter();
-  List<List<HlSpan>>? _spans; // spans per line of the current window (recomputed in build when the window changes)
-  DocWindow? _hlWindow; // the window highlighting was last computed for (change detection)
+  List<List<HlSpan>>?
+  _spans; // spans per line of the current window (recomputed in build when the window changes)
+  DocWindow?
+  _hlWindow; // the window highlighting was last computed for (change detection)
   // Manually chosen syntax: null = auto by extension; 'plain' = no highlighting; otherwise a
   // WASM grammar language name.
   String? _forcedSyntax;
@@ -2054,6 +982,7 @@ class _EditorViewState extends State<EditorView>
   // the painter gets the caret mapped back into the window's coordinates
   // until the next window lands, instead of a caret one past the old line
   // end landing on the next row's start for a frame.
+  @override
   final List<(int, int)> _windowSplices = [];
   int get _caretForPaint => _windowSplices.isEmpty
       ? _caretOffset
@@ -2064,10 +993,8 @@ class _EditorViewState extends State<EditorView>
     _windowSplices.add((offset, delta));
     _spliceBookmarks(offset, delta);
     _spliceFolds(offset, delta);
-    _nav.shift(offset, delta);
+    _spliceNav(offset, delta);
     int sh(int x) => x < offset ? x : (x + delta < offset ? offset : x + delta);
-    final le = _lastEditOffset;
-    if (le != null) _lastEditOffset = sh(le);
     final sc = _searchScope;
     if (sc != null) _searchScope = (sh(sc.$1), sh(sc.$2));
     final ac = _autoClosedAt;
@@ -2382,7 +1309,9 @@ class _EditorViewState extends State<EditorView>
     if (f == 'plain') return const NoHighlighter();
     final g = WasmGrammarRegistry.instance.forLang(f);
     if (g != null) return RustHighlighter.wasm(g);
-    return _pickHighlighter(_path ?? ''); // language not found → fall back to auto
+    return _pickHighlighter(
+      _path ?? '',
+    ); // language not found → fall back to auto
   }
 
   // Switch the view mode. Hex rows are a fixed 16 bytes (the anchor must be aligned); in
@@ -2391,7 +1320,8 @@ class _EditorViewState extends State<EditorView>
     if (_viewMode == m) return;
     setState(() {
       _viewMode = m;
-      _colBlock = null; // selection semantics differ (rectangle vs linear) → clear on mode change
+      _colBlock =
+          null; // selection semantics differ (rectangle vs linear) → clear on mode change
       _selAnchor = null;
       if (m == ViewMode.hex) _searchHex = true; // bytes are the unit there
     });
@@ -2408,267 +1338,6 @@ class _EditorViewState extends State<EditorView>
       _anchorLineExact = la.exact;
       await _setAnchor(ls, la.line);
     }
-  }
-
-  // Read the hex view's visible bytes (simpler than text mode: a row is a
-  // fixed 16 bytes, no line scanning). Also decodes the text column with the
-  // document's codec; a few prefix bytes give context so a multi-byte
-  // character straddling the window top still decodes (unit codecs are
-  // already aligned — the base is a multiple of 16).
-  Future<void> _reloadHex() async {
-    final doc = _doc;
-    if (doc == null) return;
-    final rows = _visibleCount + 1;
-    final pre = doc.codec.unitSize == 1
-        ? (_anchorOffset < 4 ? _anchorOffset : 4)
-        : 0;
-    final buf = await doc.readRangeBytes(
-      _anchorOffset - pre,
-      rows * hexBytesPerRow + pre,
-    );
-    final skip = pre > buf.length ? buf.length : pre;
-    final bytes = Uint8List.sublistView(buf, skip);
-    final cells = hexTextCells(doc.codec, buf, skip, bytes.length);
-    if (mounted) {
-      setState(() {
-        _hexBytes = bytes;
-        _hexCells = cells;
-        _windowSplices.clear(); // the hex window reflects every splice now
-      });
-    }
-  }
-
-  // Content width in hex mode (fixed row width, derived directly from the character count).
-  double get _hexContentW {
-    final doc = _doc;
-    final digits = hexOffsetDigits(doc?.length ?? 0);
-    return hexRowChars(digits) * editorCharWidth + 20;
-  }
-
-  // Hex-mode scrolling: the anchor moves in 16-byte steps (no line scanning needed).
-  Future<void> _hexScrollRows(int rows) async {
-    final doc = _doc;
-    if (doc == null || rows == 0) return;
-    final maxBase = _hexMaxBase(doc.length);
-    var next = _anchorOffset + rows * hexBytesPerRow;
-    if (next < 0) next = 0;
-    if (next > maxBase) next = maxBase;
-    if (next == _anchorOffset) return;
-    _anchorOffset = next;
-    await _reloadHex();
-  }
-
-  // Bottom scroll limit (wheel / scrollbar): the top row that puts the last
-  // row on the LAST COMPLETE screen row — floor, not ceil, or the wheel
-  // stopped with the last row half cut off at the viewport edge.
-  int _hexMaxBase(int length) {
-    if (length <= 0) return 0;
-    final lastRow = (length - 1) ~/ hexBytesPerRow;
-    final rowsOnScreen = _fullRowCount;
-    final maxRow = lastRow - rowsOnScreen + 1;
-    return maxRow <= 0 ? 0 : maxRow * hexBytesPerRow;
-  }
-
-  // Hex mode: scroll the caret's row into view.
-  Future<void> _ensureCaretVisibleHex() async {
-    final doc = _doc;
-    if (doc == null) return;
-    // COMPLETE rows only (floor), like the text view: _visibleCount rounds
-    // the viewport height UP, so with a partial last row the caret parked
-    // there counted as visible while its row was cut off at the viewport's
-    // bottom edge — right above the status bar, which looked like the bar
-    // covering the last line (ctrl+End on a large file).
-    final rows = _fullRowCount;
-    final caretRow = _caretOffset ~/ hexBytesPerRow;
-    final topRow = _anchorOffset ~/ hexBytesPerRow;
-    if (caretRow < topRow) {
-      _anchorOffset = caretRow * hexBytesPerRow;
-      await _reloadHex();
-    } else if (caretRow >= topRow + rows) {
-      final newTop = caretRow - rows + 1;
-      _anchorOffset = newTop * hexBytesPerRow;
-      await _reloadHex();
-    }
-  }
-
-  // Hex-mode caret movement (in bytes; hex has no notion of "line", so it bypasses the
-  // keybinding caret.* commands). [keepNibble]: up/down/page moves keep the current high/low
-  // nibble (as HxD and other hex editors do); jumps like row start/end return to the high one.
-  Future<void> _hexMoveCaret(
-    int deltaBytes, {
-    required bool select,
-    bool keepNibble = false,
-  }) async {
-    final doc = _doc;
-    if (doc == null) return;
-    // The caret may sit AFTER the last byte in every mode, like a text
-    // editor's: the selection is [anchor, caret), so pinning the caret to the
-    // last byte in overwrite mode made that byte unselectable from either
-    // side. Typing there appends (see _hexTypeDigit / _hexTypeAscii).
-    final maxOff = doc.length;
-    var next = _caretOffset + deltaBytes;
-    if (next < 0) next = 0;
-    if (next > maxOff) next = maxOff;
-    setState(() {
-      if (select) {
-        _selAnchor ??= _caretOffset;
-      } else {
-        _selAnchor = null;
-      }
-      _caretOffset = next;
-      if (!keepNibble) _hexNibble = 0;
-    });
-    _restartBlink();
-    await _ensureCaretVisibleHex();
-  }
-
-  // Left/right in the hex column: the unit is a **nibble** (half a byte).
-  // Right: high → low → next byte's high; left is the reverse. The ascii column has no
-  // nibbles and goes through _hexMoveCaret.
-  Future<void> _hexMoveNibble(int deltaNibbles, {required bool select}) async {
-    final doc = _doc;
-    if (doc == null || doc.length == 0) return;
-    final pos = hexClampNibblePos(
-      _caretOffset * 2 + _hexNibble + deltaNibbles,
-      doc.length,
-      allowEnd: true, // the caret may sit after the last byte (see _hexMoveCaret)
-    );
-    setState(() {
-      if (select) {
-        _selAnchor ??= _caretOffset;
-      } else {
-        _selAnchor = null;
-      }
-      _caretOffset = pos >> 1;
-      _hexNibble = pos & 1;
-    });
-    _restartBlink();
-    await _ensureCaretVisibleHex();
-  }
-
-  // ── Hex editing ────────────────────────────────────────────────
-  // Overwrite mode: typing rewrites the byte at the caret (the file never grows). Only
-  // delete/backspace actually remove bytes. Each overwrite = delete(1) + insertBytes(1), both
-  // pushed to the UndoStack, so undo/redo is shared with text mode.
-
-  /// Overwrite the byte at [offset] with [value] (0–255).
-  Future<void> _hexOverwrite(int offset, int value) async {
-    if (_blockedReadOnly()) return;
-    final doc = _doc;
-    if (doc == null || offset < 0 || offset >= doc.length) return;
-    final rev = await doc.overwriteBytes(offset, [value]);
-    _undo.push(rev); // compound reverse edit → one undo step restores the original byte
-    _setModified(_undo.isDirty);
-    _selAnchor = null;
-    await _afterEdit();
-  }
-
-  /// Type one hex digit in the hex column.
-  ///
-  /// Overwrite mode: the high/low nibble each replace their half; after the low nibble the
-  /// caret moves to the next byte.
-  /// Insert mode: **typing the high nibble inserts a new byte** (low nibble 0 for now), the
-  /// caret stays on that new byte's low nibble, and typing the low nibble completes it
-  /// (same as HxD).
-  Future<void> _hexTypeDigit(int digit) async {
-    if (_blockedReadOnly()) return;
-    final doc = _doc;
-    if (doc == null) return;
-    final off = _caretOffset;
-    // Insert mode, or the caret parked after the last byte (there is nothing
-    // to overwrite there, so overwrite mode appends too).
-    if ((_hexInsertMode || off >= doc.length) && _hexNibble == 0) {
-      await _hexInsertBytes(off, [digit << 4]);
-      if (!mounted) return;
-      setState(() {
-        _caretOffset = off;
-        _hexNibble = 1; // stay on the low nibble of the byte just inserted
-      });
-      return;
-    }
-    if (doc.length == 0) return;
-    final cur = await _hexByteAt(off);
-    if (cur == null) return;
-    final value = _hexNibble == 0
-        ? (digit << 4) | (cur & 0x0F)
-        : (cur & 0xF0) | digit;
-    await _hexOverwrite(off, value);
-    if (!mounted) return;
-    // Advance one nibble: after the high nibble stay on the same byte's low nibble; only
-    // after the low nibble move to the next byte.
-    await _hexMoveNibble(1, select: false);
-  }
-
-  /// Type a character in the text column: it is encoded with the document's
-  /// codec (so a CJK character in a Big5 file writes its 2 Big5 bytes) and
-  /// overwrites (or inserts) that many bytes; the caret moves past them.
-  Future<void> _hexTypeAscii(String ch) async {
-    if (_blockedReadOnly()) return;
-    final doc = _doc;
-    if (doc == null) return;
-    final enc = doc.codec.encode(ch);
-    if (enc.bytes.isEmpty) return;
-    if (enc.fallbackCount > 0) {
-      _toast(_l10n.trf('toast_unencodable_one', [doc.codec.name]));
-    }
-    if (_hexInsertMode || _caretOffset >= doc.length) {
-      // Insert mode, or after the last byte: append.
-      await _hexInsertBytes(_caretOffset, enc.bytes);
-      if (mounted) await _hexMoveCaret(enc.bytes.length, select: false);
-      return;
-    }
-    if (_caretOffset + enc.bytes.length > doc.length) {
-      _toast(_l10n.tr('toast_hex_ovr_end'));
-      return;
-    }
-    final rev = await doc.overwriteBytes(_caretOffset, enc.bytes);
-    _undo.push(rev);
-    _setModified(_undo.isDirty);
-    _selAnchor = null;
-    await _afterEdit();
-    await _hexMoveCaret(enc.bytes.length, select: false);
-  }
-
-  /// Insert bytes at [offset] (insert mode). Consecutive inserts coalesce into one undo step.
-  Future<void> _hexInsertBytes(int offset, List<int> bytes) async {
-    if (_blockedReadOnly()) return;
-    final doc = _doc;
-    if (doc == null) return;
-    final at = offset.clamp(0, doc.length);
-    final rev = await doc.insertBytes(at, bytes);
-    _undo.push(rev, coalesce: true);
-    _setModified(_undo.isDirty);
-    _selAnchor = null;
-    await _afterEdit();
-  }
-
-  /// Delete [length] bytes starting at [offset] (the document shrinks).
-  Future<void> _hexDelete(int offset, int length) async {
-    if (_blockedReadOnly()) return;
-    final doc = _doc;
-    if (doc == null || length <= 0 || offset < 0 || offset >= doc.length) {
-      return;
-    }
-    final len = (offset + length > doc.length) ? doc.length - offset : length;
-    final rev = await doc.delete(offset, len);
-    _undo.push(rev, coalesce: true);
-    _setModified(_undo.isDirty);
-    setState(() {
-      _caretOffset = offset;
-      _hexNibble = 0;
-      _selAnchor = null;
-    });
-    await _afterEdit();
-  }
-
-  /// Byte value at an offset within the current window (read from the file when outside it).
-  Future<int?> _hexByteAt(int offset) async {
-    final i = offset - _anchorOffset;
-    if (i >= 0 && i < _hexBytes.length) return _hexBytes[i];
-    final doc = _doc;
-    if (doc == null) return null;
-    final b = await doc.readRangeBytes(offset, 1);
-    return b.isEmpty ? null : b[0];
   }
 
   // Log which syntax highlighter this file uses, so the log shows which grammar was loaded
@@ -2697,13 +1366,16 @@ class _EditorViewState extends State<EditorView>
 
   // UI strings (toasts / dialogs / status bar) go through l10n; log strings
   // deliberately stay untranslated.
+  @override
   AppLocalizations get _l10n => AppLocalizations.of(context);
 
+  @override
   int get _selStart => _selAll
       ? 0
       : _selAnchor == null
       ? _caretOffset
       : (_selAnchor! < _caretOffset ? _selAnchor! : _caretOffset);
+  @override
   int get _selEnd => _selAll
       ? (_doc?.length ?? _caretOffset)
       : _selAnchor == null
@@ -2720,15 +1392,18 @@ class _EditorViewState extends State<EditorView>
 
   // ── View mode (text / column / hex) ───────────────────────────
   ViewMode _viewMode = ViewMode.text;
+  @override
   bool get _hexMode => _viewMode == ViewMode.hex;
   bool get _columnMode => _viewMode == ViewMode.column;
 
   // Column mode's rectangular selection (null = nothing selected). The caret itself stays at
   // [_caretOffset] like in text mode, so all the existing navigation keeps working; only what a
   // selection *means* changes — hence the linear [_selAnchor] is unused while a block is active.
+  @override
   ColumnBlock? _colBlock;
 
   // Visible bytes in hex mode (start = _anchorOffset, aligned to hexBytesPerRow).
+  @override
   Uint8List _hexBytes = Uint8List(0);
   // Codec-decoded text column, one cell per byte of _hexBytes (hex_cells.dart).
   List<String> _hexCells = const [];
@@ -2743,10 +1418,14 @@ class _EditorViewState extends State<EditorView>
   bool _binaryGuess = false;
   String? _autoHexPath; // the path already auto-switched (not on reopen)
   bool _encManual = false;
+  @override
   int _hexNibble = 0; // which nibble of the byte the caret is on (0=high, 1=low; used when editing)
+  @override
   HexArea _hexArea = HexArea.hex; // which column takes input (hex types hex digits, ascii types characters; Tab switches)
+  @override
   bool _hexInsertMode = false; // false=overwrite (default), true=insert; toggled by the Insert key
-  final GlobalKey _hexKey = GlobalKey(); // to reach RenderHexViewport for hit-testing
+  final GlobalKey _hexKey =
+      GlobalKey(); // to reach RenderHexViewport for hit-testing
 
   // Tell the shell (AppBar/menubar) to rebuild — only at points where the display changes.
   void _bump() => widget.controller._bump();
@@ -2781,6 +1460,7 @@ class _EditorViewState extends State<EditorView>
 
   // Set the modified flag, notifying the shell only on a real change (so the AppBar is not
   // rebuilt on every keystroke).
+  @override
   void _setModified(bool v) {
     if (_modified == v) return;
     _modified = v;
@@ -2796,6 +1476,7 @@ class _EditorViewState extends State<EditorView>
     AppSettings.instance.addListener(_onSettingsChanged);
     _undo.maxSteps = AppSettings.instance.undoMaxSteps;
     _focus.addListener(_onFocusChange);
+    _searchCtl.addListener(_scheduleSearchMarks);
     final p = widget.initialPath;
     if (p != null) {
       // Defer loading until after the first frame: _loadDocument calls setState and uses
@@ -2809,6 +1490,11 @@ class _EditorViewState extends State<EditorView>
             keepCodec: widget.initialEncoding,
           ).then((_) => Log.instance.mark('document loaded: $_name'));
         }
+      });
+    } else if (widget.initialUntitledStash != null) {
+      final stash = widget.initialUntitledStash!;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _restoreUntitled(stash);
       });
     } else if (widget.startBlank) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -2906,13 +1592,11 @@ class _EditorViewState extends State<EditorView>
     await UserKeymap.instance.replaceAll(
       Keymap.fromJson(j, isMac: Platform.isMacOS).bindings,
     );
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(_l10n.trf('toast_custom_keymap', [_keymapName])),
-        ),
-      );
-    }
+    if (!mounted) return;
+    // ignore: use_build_context_synchronously
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(_l10n.trf('toast_custom_keymap', [_keymapName]))),
+    );
   }
 
   // ── EditorActions: commands drive the editor through these ──
@@ -2941,7 +1625,8 @@ class _EditorViewState extends State<EditorView>
     // vim modes: entering visual anchors the selection at the caret; back to normal clears it.
     if (mode == 'visual') _selAnchor = _caretOffset;
     if (mode == 'normal') _selAnchor = null;
-    _undo.breakCoalescing(); // mode change → the next edit is its own undo entry
+    _undo
+        .breakCoalescing(); // mode change → the next edit is its own undo entry
     _resolver?.mode = mode;
     _syncIme(); // in modal keymaps the IME attaches/detaches on entering/leaving insert
     if (mounted) setState(() {});
@@ -2952,6 +1637,7 @@ class _EditorViewState extends State<EditorView>
   // the chain: `.then` on an errored future skips every later callback, so
   // one exception would silently kill all caret commands for the pane's
   // lifetime. Catch, log, move on.
+  @override
   void _enqueueCaret(Future<void> Function() op) {
     _caretOps = _caretOps.then((_) async {
       if (_doc == null) return;
@@ -3364,7 +2050,12 @@ class _EditorViewState extends State<EditorView>
       final (lines, starts, _) = got;
       // Each line contributes its own slice, joined with newlines (pasting elsewhere yields
       // the same rectangle).
-      final text = blockSliceTexts(blk, lines, starts, tabSize: _tabSize).join(_newline);
+      final text = blockSliceTexts(
+        blk,
+        lines,
+        starts,
+        tabSize: _tabSize,
+      ).join(_newline);
       await _setClipboard(text);
       _toast(_l10n.trf('toast_block_copied', [lines.length]));
       return;
@@ -3414,7 +2105,12 @@ class _EditorViewState extends State<EditorView>
         return;
       }
       final (lines, starts, _) = got;
-      final text = blockSliceTexts(blk, lines, starts, tabSize: _tabSize).join(_newline);
+      final text = blockSliceTexts(
+        blk,
+        lines,
+        starts,
+        tabSize: _tabSize,
+      ).join(_newline);
       await _setClipboard(text);
       // Clear the block; pushes its own grouped reverse as one undo step.
       await _doBlockEdit('');
@@ -3860,45 +2556,6 @@ class _EditorViewState extends State<EditorView>
   void menuAction(String action) =>
       widget.controller.onMenuAction?.call(action);
 
-  // ── Navigation history (Go Back / Forward / last edit) ──
-  // A "jump" = the caret lands somewhere not currently on screen; the
-  // position being left is recorded, so Back returns there. Walking the
-  // history itself does not record (see _navigating).
-  final NavHistory _nav = NavHistory();
-  bool _navigating = false;
-  int? _lastEditOffset; // where the most recent edit happened
-
-  Future<void> _navTo(int? off) async {
-    if (off == null || _doc == null) return;
-    _navigating = true;
-    try {
-      _colBlock = null;
-      _selAnchor = null;
-      await _moveCaretTo(off, false);
-    } finally {
-      _navigating = false;
-    }
-  }
-
-  @override
-  void navBack() => _enqueueCaret(() => _navTo(_nav.back(_caretOffset)));
-
-  @override
-  void navForward() => _enqueueCaret(() => _navTo(_nav.forward()));
-
-  @override
-  void navLastEdit() => _enqueueCaret(() async {
-    final off = _lastEditOffset;
-    if (off == null || off == _caretOffset) return;
-    _recordJumpFrom(_caretOffset);
-    await _navTo(off);
-  });
-
-  // Record [from] as a history entry unless we are replaying the history.
-  void _recordJumpFrom(int from) {
-    if (!_navigating) _nav.record(from);
-  }
-
   @override
   void toggleFoldAtCaret() => _enqueueCaret(() async {
     final doc = _doc;
@@ -4072,6 +2729,7 @@ class _EditorViewState extends State<EditorView>
   // dropped and the reopened document redoes it — and only otherwise worth
   // a warning. (Found by edit_undo_fuzz_test's save op: the exception
   // escaped as an unhandled error.)
+  @override
   Future<void> _offQueue(String what, Future<void> Function() body) async {
     final d = _doc;
     try {
@@ -4100,15 +2758,57 @@ class _EditorViewState extends State<EditorView>
     }
   }
 
-  // Quick font zoom: bump the global zoom factor (every pane re-renders via the
-  // settings listener) and flash the new percentage. The toast replaces the
+  // Quick font zoom is per tab: [_zoom] multiplies the font dialog's size /
+  // row height for this pane only (restored from SessionFile.zoom). The
+  // members below shadow the top-level metric getters / line builders with
+  // that factor, so the state's geometry code reads as before — and MUST
+  // match RenderTextViewport's copies (hit-tests mirror the painter).
+  late double _zoom = widget.initialZoom;
+
+  double get _fontSize => editorFontSizeAt(_zoom);
+  @override
+  double get _lineHeight => editorLineHeightAt(_zoom);
+  @override
+  double get editorCharWidth => editorCharWidthAt(_zoom);
+  double _gutterWidthFor(int anchorLine, int linesInWindow) =>
+      _gutterWidthAt(anchorLine, linesInWindow, _zoom);
+  _LinePara _buildLine(
+    String raw,
+    double maxWidth, [
+    Color? textColor,
+    int startColumn = 0,
+    bool? baseRtl,
+  ]) => _buildLineAt(
+    _zoom,
+    raw,
+    maxWidth,
+    textColor,
+    startColumn,
+    baseRtl,
+    _tabSize,
+  );
+
+  // Step this tab's zoom and flash the new percentage. Same refresh as a
+  // font change in the settings (row count, content width and wrap points
+  // all depend on the metrics), limited to this pane. The toast replaces the
   // previous one instead of queueing — a wheel burst would otherwise stack
   // seconds of snackbars.
   @override
   void zoomFont(int steps) {
-    AppSettings.instance.zoomFont(steps);
     if (!mounted) return;
-    final pct = (AppSettings.instance.fontZoom * 100).round();
+    final next = AppSettings.stepZoom(_zoom, steps);
+    if (next != _zoom) {
+      _hlWindow = null; // rows / window spans are keyed on the metrics
+      setState(() {
+        _zoom = next;
+        _settingsEpoch++;
+      });
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _reload();
+      });
+      _bump(); // the shell saves the session (SessionFile.zoom)
+    }
+    final pct = (_zoom * 100).round();
     final m = ScaffoldMessenger.of(context);
     m.removeCurrentSnackBar();
     m.showSnackBar(
@@ -4149,9 +2849,52 @@ class _EditorViewState extends State<EditorView>
     );
   }
 
+  // ── Checksums (View menu) ────────────────────────────────────
+
+  // Hash the (linear) selection when there is one, the whole document
+  // otherwise. The dialog streams the byte range chunk by chunk with a
+  // progress bar and stops when dismissed.
+  void _showChecksum() {
+    final doc = _doc;
+    if (doc == null) return;
+    final s = _selStart, e = _selEnd;
+    final hasSel = _colBlock == null && e > s;
+    showDialog<void>(
+      context: context,
+      builder: (_) => _ChecksumDialog(
+        doc: doc,
+        start: hasSel ? s : 0,
+        end: hasSel ? e : doc.length,
+        selection: hasSel,
+      ),
+    );
+  }
+
+  // ── Copy bytes (View menu) ───────────────────────────────────
+
+  // Offer the (linear) selection as a C array / hex string when there is one,
+  // the whole document otherwise. Same scope rule as the checksum dialog; the
+  // bytes are raw, so it is just as useful in hex mode.
+  void _showCopyBytes() {
+    final doc = _doc;
+    if (doc == null) return;
+    final s = _selStart, e = _selEnd;
+    final hasSel = _colBlock == null && e > s;
+    showDialog<void>(
+      context: context,
+      builder: (_) => _CopyBytesDialog(
+        doc: doc,
+        start: hasSel ? s : 0,
+        end: hasSel ? e : doc.length,
+        selection: hasSel,
+      ),
+    );
+  }
+
   // ── Context menu ─────────────────────────────────────────────
-  // A fixed set of common editor commands (dispatched through the command
-  // registry, so they behave exactly like their keys) with the live shortcut
+  // The items come from settings/context_menu.json (Settings → Context Menu
+  // Editor); editor commands go through the command registry, so they behave
+  // exactly like their keys, shell actions through the controller. Live shortcut
   // labels from the effective keymap. A right-click outside the selection
   // first moves the caret there (like every other editor); inside it keeps
   // the selection so cut/copy apply to it.
@@ -4178,6 +2921,8 @@ class _EditorViewState extends State<EditorView>
     }
     if (!mounted) return;
     final l10n = _l10n;
+    // ignore: use_build_context_synchronously
+    final disabledColor = Theme.of(context).disabledColor;
     final hasSel = _selEnd > _selStart;
     final ro = _readOnly;
     PopupMenuItem<String> item(
@@ -4199,71 +2944,62 @@ class _EditorViewState extends State<EditorView>
           const SizedBox(width: 24),
           Text(
             _shortcutLabelFor(command),
-            style: TextStyle(
-              fontSize: 11.5,
-              color: Theme.of(context).disabledColor,
-            ),
+            style: TextStyle(fontSize: 11.5, color: disabledColor),
           ),
         ],
       ),
     );
-    final items = <PopupMenuEntry<String>>[
-      item(
-        'item_undo',
-        'edit.undo',
-        enabled: !ro && _undo.canUndo,
-        icon: Icons.undo,
-      ),
-      item(
-        'item_redo',
-        'edit.redo',
-        enabled: !ro && _undo.canRedo,
-        icon: Icons.redo,
-      ),
-      const PopupMenuDivider(),
-      item(
-        'item_cut',
-        'edit.cut',
-        enabled: !ro && hasSel,
-        icon: Icons.content_cut,
-      ),
-      item('item_copy', 'edit.copy', enabled: hasSel, icon: Icons.content_copy),
-      item(
-        'item_paste',
-        'edit.paste',
-        enabled: !ro && !_hexMode,
-        icon: Icons.content_paste,
-      ),
-      item('ctx_delete', 'ctx.delete', enabled: !ro && hasSel),
-      const PopupMenuDivider(),
-      item('item_select_all', 'edit.selectAll'),
-      if (!_hexMode) ...[
-        const PopupMenuDivider(),
-        item('item_find', 'search.find', icon: Icons.search),
+    // Enabled state of the commands whose availability is known here; any
+    // other item is always enabled (the command itself toasts when it can't
+    // run, e.g. an edit in a read-only file).
+    bool enabledFor(String a) => switch (a) {
+      'edit.undo' => !ro && _undo.canUndo,
+      'edit.redo' => !ro && _undo.canRedo,
+      'edit.cut' || 'ctx.delete' => !ro && hasSel,
+      'edit.copy' => hasSel,
+      'edit.paste' => !ro && !_hexMode,
+      'search.replace' ||
+      'edit.toggleComment' ||
+      'edit.upper' ||
+      'edit.lower' => !ro,
+      _ => true,
+    };
+    // Hidden rather than greyed: text-only commands in hex mode, and fold
+    // commands while the file has nothing to fold.
+    bool shown(String a) {
+      if (a.startsWith('fold.')) return !_hexMode && _hasFolds;
+      if (_hexMode) return !_textOnlyContextActions.contains(a);
+      return true;
+    }
+
+    final config =
+        EditorController.contextMenuItems ?? await _bundledContextMenu();
+    if (!mounted) return;
+    final items = <PopupMenuEntry<String>>[];
+    var pendingSep = false;
+    for (final n in config) {
+      if (n.isSeparator) {
+        pendingSep = items.isNotEmpty;
+        continue;
+      }
+      final a = n.action;
+      // Flat list: submenus (no action) and dynamic nodes are not supported.
+      if (a == null || n.dynamicId != null || !shown(a)) continue;
+      if (pendingSep) items.add(const PopupMenuDivider());
+      pendingSep = false;
+      items.add(
         item(
-          'item_replace',
-          'search.replace',
-          enabled: !ro,
-          icon: Icons.find_replace,
+          n.labelKey ?? a,
+          a,
+          enabled: enabledFor(a),
+          icon: MenuNode.menuIcons[n.icon],
         ),
-        item('item_goto_line', 'search.gotoLine'),
-        const PopupMenuDivider(),
-        item(
-          'item_bookmark_toggle',
-          'bookmark.toggle',
-          icon: Icons.bookmark_add_outlined,
-        ),
-        item('item_toggle_comment', 'edit.toggleComment', enabled: !ro),
-        item('item_upper', 'edit.upper', enabled: !ro),
-        item('item_lower', 'edit.lower', enabled: !ro),
-        if (_hasFolds) ...[
-          const PopupMenuDivider(),
-          item('item_fold', 'fold.fold'),
-          item('item_unfold', 'fold.unfold'),
-        ],
-      ],
-    ];
+      );
+    }
+    if (items.isEmpty) return;
+    if (!mounted) return;
     final choice = await showMenu<String>(
+      // ignore: use_build_context_synchronously
       context: context,
       position: RelativeRect.fromLTRB(
         global.dx,
@@ -4279,153 +3015,47 @@ class _EditorViewState extends State<EditorView>
       _enqueueCaret(() => _forEachCursor((_) => _doDeleteForward()));
       return;
     }
-    _registry.dispatch(choice, this, null, 1);
-    _recordStep(MacroCommand(choice));
+    if (_registry.lookup(choice) != null) {
+      // Same path as the key binding (and recorded the same way).
+      _registry.dispatch(choice, this, null, 1);
+      _recordStep(MacroCommand(choice));
+    } else {
+      // A shell-only menu action the user added (Save All, Compare Files…).
+      widget.controller.onMenuAction?.call(choice);
+    }
   }
 
-  // ── Autocomplete / word completion ───────────────────────────────────
-  // Candidates = the document's own words (word_index.dart, rescanned with a
-  // debounce after edits/loads, first 8MB) + the language's keywords. The
-  // popup opens as you type once the word prefix reaches the configured
-  // length (or on ctrl+space), follows further typing / backspace, and
-  // Enter / Tab accept; any caret move or click closes it.
-  Set<String> _words = const {};
-  Timer? _wordScanTimer;
-  int _wordScanSerial = 0;
-  _CompletionState? _completion;
+  /// Commands that only make sense on text: left out of the hex-mode menu.
+  static const _textOnlyContextActions = {
+    'search.find',
+    'search.replace',
+    'search.gotoLine',
+    'bookmark.toggle',
+    'edit.toggleComment',
+    'edit.upper',
+    'edit.lower',
+  };
 
-  void _scheduleWordScan() {
-    if (!AppSettings.instance.autoComplete && _completion == null) return;
-    _wordScanTimer?.cancel();
-    _wordScanTimer = Timer(const Duration(milliseconds: 1200), _scanWords);
-  }
+  static List<MenuNode>? _bundledContextMenuCache;
 
-  Future<void> _scanWords() => _offQueue('word scan', _scanWordsNow);
-
-  Future<void> _scanWordsNow() async {
-    final doc = _doc;
-    if (doc == null || _hexMode) return;
-    final serial = ++_wordScanSerial;
-    final words = await scanDocumentWords(
-      doc,
-      cancelled: () => serial != _wordScanSerial,
-    );
-    if (!mounted || serial != _wordScanSerial) return;
-    _words = words;
-  }
-
-  Set<String> get _languageKeywords {
-    final p = _path;
-    if (p == null) return const {};
-    final dot = p.lastIndexOf('.');
-    final ext = dot >= 0 ? p.substring(dot + 1).toLowerCase() : '';
-    return HighlightConfig.instance.forExt(ext).keywords;
-  }
-
-  // The identifier prefix before the caret (null when the line is too long
-  // to read cheaply or the caret is not right after a word).
-  Future<String?> _wordPrefixAtCaret() async {
-    final doc = _doc;
-    if (doc == null) return null;
-    final ls = await doc.lineStartOf(_caretOffset);
-    final len = _caretOffset - ls;
-    if (len <= 0 || len > 4096) return len <= 0 ? '' : null;
-    final d = await doc.readRangeDecoded(ls, len);
-    return wordPrefixBefore(d.text, d.text.length);
-  }
-
-  // After a keystroke landed: open / refresh / close the popup.
-  Future<void> _completionAfterTyping(String typed) async {
-    final s = AppSettings.instance;
-    if (_hexMode || _readOnly || _composing.isNotEmpty || _multi) {
-      _closeCompletion();
-      return;
-    }
-    final open = _completion != null;
-    if (!open) {
-      if (!s.autoComplete) return;
-      // Only a typed word character opens it (not paste, Enter, space…).
-      if (typed.length != 1 || !isWordCodeUnit(typed.codeUnitAt(0))) return;
-    }
-    final prefix = await _wordPrefixAtCaret();
-    if (prefix == null || prefix.isEmpty) {
-      _closeCompletion();
-      return;
-    }
-    if (!open && prefix.length < s.autoCompleteMinChars) return;
-    if (_words.isEmpty && _wordScanTimer == null) {
-      await _scanWords(); // first use on this document
-    }
-    _showCompletion(prefix, manual: false);
-  }
-
-  void _showCompletion(String prefix, {required bool manual}) {
-    final items = completionsFor(
-      _words,
-      prefix,
-      keywords: _languageKeywords,
-      max: 12,
-    );
-    if (items.isEmpty) {
-      _closeCompletion();
-      if (manual) _toast(_l10n.tr('toast_no_completion'));
-      return;
-    }
-    final pos = _caretScreenPos();
-    if (pos == null) {
-      _closeCompletion();
-      return;
-    }
-    final prev = _completion;
-    setState(() {
-      _completion = _CompletionState(
-        prefix: prefix,
-        items: items,
-        selected: prev != null && prev.selected < items.length
-            ? prev.selected
-            : 0,
-        anchor: pos,
+  /// The packaged assets/context_menu.json, for when the shell has not
+  /// provided [EditorController.contextMenuItems].
+  static Future<List<MenuNode>> _bundledContextMenu() async {
+    final cached = _bundledContextMenuCache;
+    if (cached != null) return cached;
+    try {
+      final raw = await rootBundle.loadString('assets/context_menu.json');
+      return _bundledContextMenuCache = MenuNode.parseNodes(
+        (jsonDecode(raw) as Map)['items'],
       );
-    });
-  }
-
-  void _closeCompletion() {
-    if (_completion == null) return;
-    if (mounted) setState(() => _completion = null);
-  }
-
-  void _acceptCompletion([int? index]) {
-    final c = _completion;
-    if (c == null) return;
-    final i = index ?? c.selected;
-    if (i < 0 || i >= c.items.length) return;
-    final word = c.items[i].word;
-    final prefix = c.prefix;
-    _closeCompletion();
-    // Replace the typed prefix (case may differ) with the whole word.
-    _enqueueCaret(() async {
-      final doc = _doc;
-      if (doc == null) return;
-      final tail = word.startsWith(prefix)
-          ? word.substring(prefix.length)
-          : null;
-      if (tail != null) {
-        await _forEachCursor((_) => _doInsert(tail));
-      } else {
-        await _forEachCursor((_) async {
-          final ls = await doc.lineStartOf(_caretOffset);
-          final len = _caretOffset - ls;
-          final d = await doc.readRangeDecoded(ls, len);
-          final p = wordPrefixBefore(d.text, d.text.length);
-          final pStart = ls + d.byteForCodeUnit(d.text.length - p.length);
-          _selAnchor = pStart;
-          await _doInsert(word); // replaces the selection
-        });
-      }
-    });
+    } catch (e) {
+      Log.instance.w('context menu: bundled default unreadable ($e)');
+      return const [];
+    }
   }
 
   // Pixel position just below the caret (viewport coordinates).
+  @override
   Offset? _caretScreenPos() {
     final win = _window;
     if (win == null) return null;
@@ -4440,7 +3070,7 @@ class _EditorViewState extends State<EditorView>
       r.text,
       _layoutMaxW,
       null,
-      _rowStartColumn(win, r),
+      _rowStartColumn(win, r, _tabSize),
       _baseRtl,
     );
     final gw = _gutterWidthFor(_anchorLine, win.lines.length);
@@ -4452,127 +3082,6 @@ class _EditorViewState extends State<EditorView>
           para.xOf(r.charOfByte(within)) -
           _scrollX,
       (row + 1) * _lineHeight,
-    );
-  }
-
-  // Keys the popup owns while open. True = consumed.
-  bool _completionKey(KeyEvent e) {
-    final c = _completion;
-    if (c == null) return false;
-    final k = e.logicalKey;
-    if (k == LogicalKeyboardKey.escape) {
-      _closeCompletion();
-      return true;
-    }
-    if (k == LogicalKeyboardKey.enter || k == LogicalKeyboardKey.tab) {
-      _acceptCompletion();
-      return true;
-    }
-    if (k == LogicalKeyboardKey.arrowDown || k == LogicalKeyboardKey.arrowUp) {
-      final n = c.items.length;
-      final d = k == LogicalKeyboardKey.arrowDown ? 1 : -1;
-      setState(() => c.selected = (c.selected + d + n) % n);
-      return true;
-    }
-    if (k == LogicalKeyboardKey.pageDown || k == LogicalKeyboardKey.pageUp) {
-      final n = c.items.length;
-      final d = k == LogicalKeyboardKey.pageDown ? 6 : -6;
-      setState(() => c.selected = (c.selected + d).clamp(0, n - 1));
-      return true;
-    }
-    // Anything else that moves the caret (Home/End/←/→) closes it; typing
-    // keeps it open and re-filters through _completionAfterTyping.
-    if (k == LogicalKeyboardKey.arrowLeft ||
-        k == LogicalKeyboardKey.arrowRight ||
-        k == LogicalKeyboardKey.home ||
-        k == LogicalKeyboardKey.end) {
-      _closeCompletion();
-    }
-    return false;
-  }
-
-  @override
-  void triggerCompletion() => _enqueueCaret(() async {
-    if (_doc == null || _hexMode || _readOnly) return;
-    final prefix = await _wordPrefixAtCaret();
-    if (prefix == null || prefix.isEmpty) return;
-    if (_words.isEmpty) await _scanWords();
-    _showCompletion(prefix, manual: true);
-  });
-
-  Widget _completionPopup() {
-    final c = _completion!;
-    const w = 260.0;
-    const rowH = 24.0;
-    final h = c.items.length * rowH + 4;
-    var left = c.anchor.dx;
-    if (left + w > _viewportW) left = (_viewportW - w).clamp(0.0, left);
-    var top = c.anchor.dy;
-    if (top + h > _viewportH && c.anchor.dy - _lineHeight - h >= 0) {
-      top = c.anchor.dy - _lineHeight - h; // not enough room below: above
-    }
-    final theme = Theme.of(context);
-    return Positioned(
-      left: left,
-      top: top,
-      width: w,
-      height: h,
-      child: Material(
-        key: const ValueKey('completion-popup'),
-        elevation: 6,
-        borderRadius: BorderRadius.circular(4),
-        color: theme.colorScheme.surfaceContainerHigh,
-        child: ListView.builder(
-          padding: const EdgeInsets.symmetric(vertical: 2),
-          itemExtent: rowH,
-          itemCount: c.items.length,
-          itemBuilder: (_, i) {
-            final it = c.items[i];
-            final sel = i == c.selected;
-            return InkWell(
-              onTap: () => _acceptCompletion(i),
-              child: Container(
-                color: sel
-                    ? theme.colorScheme.primary.withValues(alpha: 0.25)
-                    : null,
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                alignment: Alignment.centerLeft,
-                child: Row(
-                  children: [
-                    Icon(
-                      it.keyword ? Icons.key : Icons.text_fields,
-                      size: 14,
-                      color: theme.disabledColor,
-                    ),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: RichText(
-                        overflow: TextOverflow.ellipsis,
-                        text: TextSpan(
-                          style: TextStyle(
-                            fontFamily: editorMonoFont,
-                            fontSize: 13,
-                            color: theme.colorScheme.onSurface,
-                          ),
-                          children: [
-                            TextSpan(
-                              text: it.word.substring(0, c.prefix.length),
-                              style: const TextStyle(
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                            TextSpan(text: it.word.substring(c.prefix.length)),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          },
-        ),
-      ),
     );
   }
 
@@ -4982,410 +3491,6 @@ class _EditorViewState extends State<EditorView>
     await _afterFoldChange(scrollToCaret: false);
   });
 
-  // ── Bookmarks (line-start byte offsets) ──────────────────────────────
-
-  final Set<int> _bookmarks = {};
-  Set<int> _bookmarksView = const {}; // immutable snapshot for the painter
-  String? _bookmarksPath; // which file the set belongs to
-  bool _initialBookmarksUsed = false; // widget.initialBookmarks consumed once
-
-  void _bookmarksChanged() {
-    _bookmarksView = Set.unmodifiable(_bookmarks);
-    if (mounted) setState(() {});
-    widget.controller.bookmarksEpoch.value++; // bookmark panel refresh
-  }
-
-  void _removeBookmark(int offset) {
-    if (_bookmarks.remove(offset)) _bookmarksChanged();
-  }
-
-  // Line number + preview for every bookmark (bookmark panel). Line
-  // numbers are exact within the indexed prefix, estimated beyond it.
-  Future<List<BookmarkInfo>> _bookmarkDetails() async {
-    final doc = _doc;
-    if (doc == null) return const [];
-    final sorted = _bookmarks.where((b) => b <= doc.length).toList()..sort();
-    final out = <BookmarkInfo>[];
-    for (final off in sorted) {
-      final la = await doc.absoluteLineAt(off);
-      var len = doc.length - off;
-      if (len > 512) len = 512;
-      var text = len > 0 ? (await doc.readRangeDecoded(off, len)).text : '';
-      final nl = text.indexOf('\n');
-      if (nl >= 0) text = text.substring(0, nl);
-      if (text.endsWith('\r')) text = text.substring(0, text.length - 1);
-      text = text.trim();
-      if (text.length > 160) text = text.substring(0, 160);
-      out.add(BookmarkInfo(off, la.line, la.exact, text));
-    }
-    return out;
-  }
-
-  // Document.onSplice: shift bookmark offsets with every edit (undo/redo
-  // included — apply() funnels through the same document paths). Bookmarks
-  // inside a deleted range collapse onto its start.
-  void _spliceBookmarks(int offset, int delta) {
-    if (_bookmarks.isEmpty || delta == 0) return;
-    var changed = false;
-    final moved = <int>{};
-    for (final b in _bookmarks) {
-      var nb = b;
-      if (b >= offset) {
-        if (delta > 0) {
-          nb = b + delta;
-        } else {
-          final end = offset - delta; // deleted range = [offset, end)
-          nb = b >= end ? b + delta : offset;
-        }
-      }
-      changed = changed || nb != b;
-      moved.add(nb);
-    }
-    if (!changed && moved.length == _bookmarks.length) return;
-    _bookmarks
-      ..clear()
-      ..addAll(moved);
-    _bookmarksChanged();
-  }
-
-  @override
-  void toggleBookmark() => _enqueueCaret(() async {
-    final doc = _doc;
-    if (doc == null || _hexMode) return;
-    final ls = await doc.lineStartOf(_caretOffset);
-    if (!_bookmarks.remove(ls)) _bookmarks.add(ls);
-    _bookmarksChanged();
-  });
-
-  @override
-  void nextBookmark() => _jumpBookmark(1);
-
-  @override
-  void prevBookmark() => _jumpBookmark(-1);
-
-  @override
-  void clearBookmarks() {
-    if (_bookmarks.isEmpty) return;
-    _bookmarks.clear();
-    _bookmarksChanged();
-  }
-
-  // Jump to the nearest bookmark after/before the caret's line, wrapping
-  // around at either end.
-  void _jumpBookmark(int dir) => _enqueueCaret(() async {
-    final doc = _doc;
-    if (doc == null || _hexMode || _bookmarks.isEmpty) return;
-    final sorted = _bookmarks.where((b) => b <= doc.length).toList()..sort();
-    if (sorted.isEmpty) return;
-    final cur = await doc.lineStartOf(_caretOffset);
-    final target = dir > 0
-        ? sorted.firstWhere((b) => b > cur, orElse: () => sorted.first)
-        : sorted.lastWhere((b) => b < cur, orElse: () => sorted.last);
-    _colBlock = null;
-    _selAnchor = null;
-    _undo.breakCoalescing();
-    await _moveCaretTo(target, false);
-  });
-
-  // ── Search bar ─────────────────────────────────────────────
-
-  bool _searchOpen = false;
-  bool _replaceOpen = false; // the second (replace) row of the bar
-  bool _searchRegex = false;
-  bool _searchCase = false;
-  bool _searchWord = false; // whole word (alt+w)
-  // Find in selection (alt+l): the selection at the moment the toggle went
-  // on becomes the scope; matches outside it are ignored, wrap-around and
-  // replace-all stay inside it. Edits shift it along (see _onDocSplice).
-  bool _searchInSel = false;
-  (int, int)? _searchScope;
-  // Hex mode: query is a byte sequence (`FF 00 A1`, `??` = any byte) rather
-  // than decoded text. Only consulted while in hex mode; defaults on when
-  // entering it.
-  bool _searchHex = false;
-  bool get _byteSearch => _hexMode && _searchHex;
-  bool _searching = false; // one chunked scan at a time
-  final TextEditingController _searchCtl = TextEditingController();
-  final TextEditingController _replaceCtl = TextEditingController();
-  final FocusNode _searchFocus = FocusNode();
-  final FocusNode _replaceFocus = FocusNode();
-
-  @override
-  void openSearch() {
-    if (_doc == null) return;
-    setState(() {
-      _searchOpen = true;
-      _gotoOpen = false;
-    });
-    _searchFocus.requestFocus();
-    _prefillSearchFromSelection();
-  }
-
-  @override
-  void openReplace() {
-    if (_doc == null) return;
-    if (_hexMode) {
-      openSearch(); // byte view edits bytes, not decoded text: search only
-      return;
-    }
-    setState(() {
-      _searchOpen = true;
-      _replaceOpen = true;
-      _gotoOpen = false;
-    });
-    _searchFocus.requestFocus();
-    _prefillSearchFromSelection();
-  }
-
-  void _prefillSearchFromSelection() {
-    _enqueueCaret(() async {
-      // Prefill from the selection; regex queries are never overwritten
-      // (the selection is literal text, not a pattern).
-      final doc = _doc;
-      final s = _selStart, e = _selEnd;
-      if (doc != null && e > s && e - s <= _searchSeedMax) {
-        if (_byteSearch) {
-          _searchCtl.text = formatHexBytes(await doc.readRangeBytes(s, e - s));
-        } else if (!_searchRegex) {
-          _searchCtl.text = await doc.readRangeString(s, e - s);
-        }
-      }
-      // Select the query so typing replaces it.
-      _searchCtl.selection = TextSelection(
-        baseOffset: 0,
-        extentOffset: _searchCtl.text.length,
-      );
-    });
-  }
-
-  void _closeSearch() {
-    setState(() {
-      _searchOpen = false;
-      _replaceOpen = false;
-    });
-    _focus.requestFocus();
-  }
-
-  // Find in selection on: the current (non-empty) selection becomes the
-  // scope — with nothing selected the existing scope is kept, else nothing
-  // to scope to and the toggle stays off. Off: scope forgotten.
-  void _toggleSearchInSel() {
-    if (_searchInSel) {
-      setState(() {
-        _searchInSel = false;
-        _searchScope = null;
-      });
-      return;
-    }
-    final s = _selStart, e = _selEnd;
-    if (e > s && _colBlock == null) {
-      setState(() {
-        _searchInSel = true;
-        _searchScope = (s, e);
-      });
-    } else if (_searchScope != null) {
-      setState(() => _searchInSel = true);
-    }
-  }
-
-  RegExp? _compileSearch() {
-    final p = _searchCtl.text;
-    if (p.isEmpty) return null;
-    try {
-      return compileQuery(
-        p,
-        regex: _searchRegex,
-        caseSensitive: _searchCase,
-        wholeWord: _searchWord,
-      );
-    } on FormatException {
-      _toast(_l10n.tr('toast_bad_regex'));
-      return null;
-    }
-  }
-
-  // Hex-mode byte query → pattern (null + toast when malformed or empty).
-  List<int?>? _compileBytePattern() {
-    try {
-      final pat = parseHexPattern(_searchCtl.text);
-      return pat.isEmpty ? null : pat;
-    } on FormatException {
-      _toast(_l10n.tr('toast_bad_hex'));
-      return null;
-    }
-  }
-
-  @override
-  void findNext() => _find(forward: true);
-
-  @override
-  void findPrev() => _find(forward: false);
-
-  // Replace the current hit (selection re-verified against the pattern —
-  // the buffer may have changed since it was found), then jump to the next.
-  // A selection that is not a match just jumps, like F3.
-  void _replaceCurrent() {
-    if (_blockedReadOnly()) return;
-    if (_searching) return;
-    _enqueueCaret(() async {
-      final doc = _doc;
-      if (doc == null || _hexMode) return;
-      final re = _compileSearch();
-      if (re == null) return;
-      final s = _selStart, e = _selEnd;
-      if (e <= s) return;
-      final m = await searchForward(doc, re, s);
-      if (m == null || m.start != s || m.end != e) return;
-      final text = expandReplacement(
-        _replaceCtl.text,
-        m.groups,
-        regex: _searchRegex,
-      );
-      final enc = doc.codec.encode(text);
-      final reverses = <ReverseEdit>[
-        await doc.delete(m.start, m.end - m.start),
-        if (enc.bytes.isNotEmpty) await doc.insertBytes(m.start, enc.bytes),
-      ];
-      _undo.push(ReverseEdit.group(reverses.reversed.toList()));
-      _undo.breakCoalescing();
-      if (enc.fallbackCount > 0) {
-        _toast(
-          _l10n.trf('toast_unencodable_many', [
-            enc.fallbackCount,
-            doc.codec.name,
-          ]),
-        );
-      }
-      _caretOffset = m.start + enc.bytes.length;
-      _selAnchor = null;
-      _lastMatchStart = _lastMatchEnd = null;
-      _setModified(_undo.isDirty);
-      await _afterEdit();
-    });
-    _find(forward: true); // queued after the replace above
-  }
-
-  // Replace every match in the document, all of it one undo step. Walks
-  // forward re-searching after each splice, so offsets never go stale.
-  void _replaceAll() {
-    if (_blockedReadOnly()) return;
-    if (_searching) return;
-    _enqueueCaret(() async {
-      final doc = _doc;
-      if (doc == null || _hexMode) return;
-      final re = _compileSearch();
-      if (re == null) return;
-      _searching = true;
-      if (mounted) setState(() {});
-      try {
-        final scope = _searchInSel ? _searchScope : null;
-        final (count, fallbacks) = await _replaceAllWith(
-          doc,
-          re,
-          _replaceCtl.text,
-          regex: _searchRegex,
-          from: scope?.$1 ?? 0,
-          to: scope?.$2,
-        );
-        if (count == 0) {
-          _toast(_l10n.tr('toast_not_found'));
-          return;
-        }
-        if (fallbacks > 0) {
-          _toast(
-            _l10n.trf('toast_unencodable_many', [fallbacks, doc.codec.name]),
-          );
-        }
-        _toast(_l10n.trf('toast_replaced', [count]));
-      } finally {
-        _searching = false;
-        if (mounted) setState(() {});
-      }
-    });
-  }
-
-  // Core of replace-all, shared with replace-in-files for panes that are
-  // open: returns (replacements, unencodable chars); when anything was
-  // replaced it is pushed as ONE undo step and the view is refreshed. Must
-  // run inside the caret queue.
-  Future<(int, int)> _replaceAllWith(
-    Document doc,
-    RegExp re,
-    String template, {
-    required bool regex,
-    int from = 0,
-    int? to, // find-in-selection: only matches ending here or before
-  }) async {
-    final reverses = <ReverseEdit>[];
-    var pos = from, count = 0, fallbacks = 0;
-    var limit = to;
-    while (true) {
-      final m = await searchForward(doc, re, pos);
-      if (m == null || (limit != null && m.end > limit)) break;
-      final text = expandReplacement(template, m.groups, regex: regex);
-      final enc = doc.codec.encode(text);
-      fallbacks += enc.fallbackCount;
-      reverses.add(await doc.delete(m.start, m.end - m.start));
-      if (enc.bytes.isNotEmpty) {
-        reverses.add(await doc.insertBytes(m.start, enc.bytes));
-      }
-      pos = m.start + enc.bytes.length;
-      if (limit != null) limit += enc.bytes.length - (m.end - m.start);
-      count++;
-    }
-    if (count == 0) return (0, 0);
-    // Reverses run newest-first on undo, so offsets stay valid.
-    _undo.push(ReverseEdit.group(reverses.reversed.toList()));
-    _undo.breakCoalescing();
-    _colBlock = null;
-    _selAnchor = null;
-    _lastMatchStart = _lastMatchEnd = null;
-    if (_caretOffset > doc.length) _caretOffset = doc.length;
-    _setModified(_undo.isDirty);
-    await _afterEdit();
-    return (count, fallbacks);
-  }
-
-  // Replace-in-files entry for an open pane: edits the buffer (one undo
-  // step, left modified — the user saves). null = this pane can't take it
-  // (hex mode, still loading, busy), so the caller rewrites the disk file.
-  Future<int?> _replaceAllMatches(
-    RegExp re,
-    String template, {
-    required bool regex,
-  }) {
-    if (_readOnly) return Future.value(0); // read-only pane: nothing replaced
-    final c = Completer<int?>();
-    if (_searching || _hexMode || _doc == null || _opening) {
-      c.complete(null);
-      return c.future;
-    }
-    _enqueueCaret(() async {
-      final doc = _doc;
-      if (doc == null || _hexMode) {
-        c.complete(null);
-        return;
-      }
-      _searching = true;
-      if (mounted) setState(() {});
-      try {
-        final (count, _) = await _replaceAllWith(
-          doc,
-          re,
-          template,
-          regex: regex,
-        );
-        c.complete(count);
-      } catch (e, st) {
-        c.completeError(e, st);
-      } finally {
-        _searching = false;
-        if (mounted) setState(() {});
-      }
-    });
-    return c.future;
-  }
-
   // ── User scripts (Tools menu) ──────────────────────────────
 
   bool _scripting = false;
@@ -5588,108 +3693,6 @@ class _EditorViewState extends State<EditorView>
     });
   }
 
-  // F3/shift+F3 work from a closed bar too, and a selection the USER made
-  // (≠ the previous hit — hits become selections, so "selection always
-  // wins" would break query cycling) replaces the query. Regex queries are
-  // never overwritten by seeding. The bar is shown for feedback without
-  // stealing focus, so F3 keeps cycling from the editor.
-  static const int _searchSeedMax = searchOverlap;
-  int? _lastMatchStart, _lastMatchEnd;
-
-  void _find({required bool forward}) {
-    if (_searching) return;
-    _enqueueCaret(() async {
-      final doc = _doc;
-      if (doc == null) return;
-      final s = _selStart, e = _selEnd;
-      final isOwnHit = s == _lastMatchStart && e == _lastMatchEnd;
-      final bytes = _byteSearch;
-      if (e > s && !isOwnHit && e - s <= _searchSeedMax) {
-        if (bytes) {
-          _searchCtl.text = formatHexBytes(await doc.readRangeBytes(s, e - s));
-        } else if (!_searchRegex) {
-          _searchCtl.text = await doc.readRangeString(s, e - s);
-        }
-      }
-      // Byte pattern (hex mode) or text regex — one of the two is compiled.
-      List<int?>? pat;
-      RegExp? re;
-      if (bytes) {
-        pat = _compileBytePattern();
-        if (pat == null) return;
-      } else {
-        re = _compileSearch();
-        if (re == null) return;
-      }
-      if (!_searchOpen && mounted) setState(() => _searchOpen = true);
-      _searching = true;
-      if (mounted) setState(() {});
-      try {
-        // Find-in-selection clamps the start point and rejects hits that
-        // leave the scope; wrap-around restarts at the scope's edges.
-        final scope = _searchInSel ? _searchScope : null;
-        Future<SearchMatch?> fwd(int from) async {
-          if (scope != null && from < scope.$1) from = scope.$1;
-          final m = pat != null
-              ? await searchBytesForward(doc, pat, from)
-              : await searchForward(doc, re!, from);
-          return m != null && scope != null && m.end > scope.$2 ? null : m;
-        }
-
-        Future<SearchMatch?> bwd(int before) async {
-          if (scope != null && before > scope.$2) before = scope.$2;
-          final m = pat != null
-              ? await searchBytesBackward(doc, pat, before)
-              : await searchBackward(doc, re!, before);
-          return m != null && scope != null && m.start < scope.$1 ? null : m;
-        }
-
-        SearchMatch? m;
-        var wrapped = false; // the hit came from restarting at the far edge
-        if (forward) {
-          // Continue after the current hit (= the selection), wrap once.
-          final from = _selEnd > _selStart ? _selEnd : _caretOffset;
-          final lo = scope?.$1 ?? 0;
-          m = await fwd(from);
-          if (m == null && from > lo) {
-            m = await fwd(lo);
-            wrapped = m != null;
-          }
-        } else {
-          final before = _selEnd > _selStart ? _selStart : _caretOffset;
-          final hi = scope?.$2 ?? doc.length;
-          m = await bwd(before);
-          if (m == null && before < hi) {
-            m = await bwd(hi);
-            wrapped = m != null;
-          }
-        }
-        if (m == null) {
-          _toast(_l10n.tr('toast_not_found'));
-          return;
-        }
-        // Tell the user the search passed the end (or start) and continued
-        // from the other edge — otherwise cycling silently jumps back to
-        // the first hit and looks like a new one.
-        if (wrapped) {
-          _toast(
-            _l10n.tr(
-              forward ? 'toast_search_wrapped_end' : 'toast_search_wrapped_start',
-            ),
-          );
-        }
-        _colBlock = null;
-        _selAnchor = m.start;
-        _lastMatchStart = m.start;
-        _lastMatchEnd = m.end;
-        await _moveCaretTo(m.end, true);
-      } finally {
-        _searching = false;
-        if (mounted) setState(() {});
-      }
-    });
-  }
-
   @override
   void pasteClipboard() => _enqueueCaret(() async {
     // Hex mode edits bytes a key at a time; pasting text there would insert
@@ -5707,6 +3710,7 @@ class _EditorViewState extends State<EditorView>
     _undo.breakCoalescing();
   });
 
+  @override
   void _toast(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -5797,7 +3801,9 @@ class _EditorViewState extends State<EditorView>
     if (dir > 0) {
       if (k + 2 < cuts.length) {
         return ls +
-            d.byteForCodeUnit(charInRowForColumn(d.text, cuts, k + 1, goal, tabSize: _tabSize));
+            d.byteForCodeUnit(
+              charInRowForColumn(d.text, cuts, k + 1, goal, tabSize: _tabSize),
+            );
       }
       var ns = await doc.nextLineStart(off);
       if (ns < 0) return off; // last line
@@ -5806,11 +3812,15 @@ class _EditorViewState extends State<EditorView>
       final nx = await _lineRows(ns);
       if (nx == null) return null;
       return ns +
-          nx.$1.byteForCodeUnit(charInRowForColumn(nx.$1.text, nx.$2, 0, goal, tabSize: _tabSize));
+          nx.$1.byteForCodeUnit(
+            charInRowForColumn(nx.$1.text, nx.$2, 0, goal, tabSize: _tabSize),
+          );
     }
     if (k > 0) {
       return ls +
-          d.byteForCodeUnit(charInRowForColumn(d.text, cuts, k - 1, goal, tabSize: _tabSize));
+          d.byteForCodeUnit(
+            charInRowForColumn(d.text, cuts, k - 1, goal, tabSize: _tabSize),
+          );
     }
     if (ls == 0) return off; // first line
     final ps = await _skipHiddenLine(await doc.lineStartOf(ls - 1), -1);
@@ -5819,7 +3829,13 @@ class _EditorViewState extends State<EditorView>
     final lastRow = pv.$2.length - 2;
     return ps +
         pv.$1.byteForCodeUnit(
-          charInRowForColumn(pv.$1.text, pv.$2, lastRow, goal, tabSize: _tabSize),
+          charInRowForColumn(
+            pv.$1.text,
+            pv.$2,
+            lastRow,
+            goal,
+            tabSize: _tabSize,
+          ),
         );
   }
 
@@ -5833,9 +3849,13 @@ class _EditorViewState extends State<EditorView>
     int targetStart;
     if (dir < 0) {
       if (curStart == 0) return off; // already on the first line
-      targetStart = await doc.lineStartOf(curStart - 1); // previous line's start
+      targetStart = await doc.lineStartOf(
+        curStart - 1,
+      ); // previous line's start
     } else {
-      final ns = await doc.nextLineStart(off); // next line's start (after the \n)
+      final ns = await doc.nextLineStart(
+        off,
+      ); // next line's start (after the \n)
       if (ns < 0) return off; // already on the last line
       targetStart = ns;
     }
@@ -5849,11 +3869,14 @@ class _EditorViewState extends State<EditorView>
     // A target column inside a wide character snaps left (caret before that character); a
     // line shorter than the target column stops at its end.
     return targetStart +
-        d.byteForCodeUnit(charIndexForColumn(d.text, _goalColumn ?? 0, tabSize: _tabSize));
+        d.byteForCodeUnit(
+          charIndexForColumn(d.text, _goalColumn ?? 0, tabSize: _tabSize),
+        );
   }
 
   // Apply a caret move: update selection/caret, ensure visibility, repaint and restart the
   // blink.
+  @override
   Future<void> _moveCaretTo(
     int offset,
     bool select, {
@@ -5911,7 +3934,8 @@ class _EditorViewState extends State<EditorView>
     if (_selAnchor == _caretOffset) _selAnchor = null;
     _caretAtRowEnd = rowEnd;
     if (!keepGoal) _goalColumn = null;
-    _undo.breakCoalescing(); // caret moved → the next edit is its own undo entry
+    _undo
+        .breakCoalescing(); // caret moved → the next edit is its own undo entry
     await _ensureCaretVisible();
     _scheduleBracketMatch();
     if (mounted) setState(_restartBlink);
@@ -5920,6 +3944,7 @@ class _EditorViewState extends State<EditorView>
   // Rows that fit the viewport in full. The window reads a couple more
   // (_visibleCount + 1) so a row cut off at the bottom still paints, but a
   // caret parked on one of those is invisible — "visible" here means fully.
+  @override
   int get _fullRowCount {
     final n = (_viewportH / _lineHeight).floor();
     return n > 0 ? n : 1;
@@ -6047,16 +4072,14 @@ class _EditorViewState extends State<EditorView>
       line,
       _layoutMaxW,
       null,
-      _rowStartColumn(_window, r),
+      _rowStartColumn(_window, r, _tabSize),
       _baseRtl,
     );
     // Measure the (possibly new) window first: in document RTL layout the
     // row shift — hence x and the scroll range — depend on its content width,
     // and build has not seen this window yet.
     _ensureContentW();
-    var x =
-        _rowShift(para) +
-        para.xOf(r.charOfByte(within));
+    var x = _rowShift(para) + para.xOf(r.charOfByte(within));
     if (_composing.isNotEmpty) {
       // The composition overlay is drawn right of the caret → keep it visible too
       x += _buildLine(_composing, _layoutMaxW).width;
@@ -6069,10 +4092,13 @@ class _EditorViewState extends State<EditorView>
     } else if (x > _scrollX + viewW - margin) {
       target = x - viewW + margin;
     }
-    _scrollX = target < 0 ? 0.0 : target; // build clamps the upper bound with the new window's content width
+    _scrollX = target < 0
+        ? 0.0
+        : target; // build clamps the upper bound with the new window's content width
   }
 
   // ── Blink ──
+  @override
   void _restartBlink() {
     _caretOn = true;
     _blinkTimer?.cancel();
@@ -6100,6 +4126,12 @@ class _EditorViewState extends State<EditorView>
   // lines, and the range the click selected (_dragBase) is always kept.
   _DragMode _dragMode = _DragMode.char;
   (int, int)? _dragBase;
+
+  // True while the selection is being moved (a move-drag): the text-area
+  // cursor drops the I-beam for an arrow for the duration, back on release.
+  // A plain drag-select keeps the I-beam; only moving already-selected text
+  // is an arrow.
+  bool _dragCursor = false;
 
   // The tap recognizer fires onTapDown at its 100ms deadline; a drag that
   // wins the arena before that skips onTapDown entirely, so onPanStart
@@ -6167,6 +4199,17 @@ class _EditorViewState extends State<EditorView>
   int? _dropOffset;
 
   void _moveDragHover(Offset local) {
+    // Dragging the selected text to the top/bottom edge scrolls the view (the
+    // selection itself stays put) so it can be dropped outside the viewport —
+    // the move-drag counterpart of drag-select auto-scroll. The drop marker
+    // tracks the edge row, so it keeps advancing as the view scrolls.
+    if (!_hexMode && _lineHeight > 0) {
+      if (local.dy < 0) {
+        if (_anchorOffset > 0) _scrollByLines(-1);
+      } else if (local.dy >= _fullRowCount * _lineHeight) {
+        _scrollByLines(1);
+      }
+    }
     final off = _offsetAt(local);
     if (off == _dropOffset) return;
     setState(() => _dropOffset = off);
@@ -6534,7 +4577,7 @@ class _EditorViewState extends State<EditorView>
       line,
       _layoutMaxW,
       null,
-      _rowStartColumn(_window, _rows[row]),
+      _rowStartColumn(_window, _rows[row], _tabSize),
       _baseRtl,
     );
     final dx = (local.dx - gw - _gutterPad + _scrollX - _rowShift(para)).clamp(
@@ -6593,6 +4636,22 @@ class _EditorViewState extends State<EditorView>
     if (vcol != null) _goalColumn = vcol; // up/down keep the virtual column
   }
 
+  // Drag-select past the TOP edge. Below the bottom the loaded window already
+  // holds a couple of extra rows, so _offsetAt parks the caret on one and
+  // _ensureCaretVisible scrolls down. Above the top there is no such buffer (the
+  // window starts at the top visible row), so mirror it: park the caret on the
+  // row above the anchor, which _ensureCaretVisible scrolls to the top. Returns
+  // true when it consumed the update (text mode, pointer above the top edge).
+  bool _dragScrollUp(Offset local) {
+    if (_hexMode || local.dy >= 0 || _anchorOffset <= 0) return false;
+    _enqueueCaret(() async {
+      final prev = await _prevRowStart(_anchorOffset);
+      if (prev == _anchorOffset) return; // already at the start of the file
+      await _moveCaretTo(prev, true);
+    });
+    return true;
+  }
+
   // Column mode hit-test past the end of a row: the display column the
   // pointer is on, counting the empty space after the text in cells of the
   // monospace font. Null when the pointer is over (or before) the text.
@@ -6607,7 +4666,7 @@ class _EditorViewState extends State<EditorView>
       line,
       _layoutMaxW,
       null,
-      _rowStartColumn(_window, _rows[row]),
+      _rowStartColumn(_window, _rows[row], _tabSize),
       _baseRtl,
     );
     final extra = (dx - para.width) / editorCharWidth;
@@ -6629,7 +4688,7 @@ class _EditorViewState extends State<EditorView>
       line,
       _layoutMaxW,
       null,
-      _rowStartColumn(_window, _rows[row]),
+      _rowStartColumn(_window, _rows[row], _tabSize),
       _baseRtl,
     );
     // Add back the horizontal scroll offset (screen x → x within the row); a right-aligned
@@ -6662,6 +4721,7 @@ class _EditorViewState extends State<EditorView>
   // each later net byte delta (multi_cursor.dart). Every reverse pushed on
   // the way becomes ONE undo step; view refresh happens once at the end.
   // [op] gets the cursor's index in document order (paste distribution).
+  @override
   Future<void> _forEachCursor(
     Future<void> Function(int docOrderIndex) op, {
     bool edit = true,
@@ -6756,7 +4816,10 @@ class _EditorViewState extends State<EditorView>
     _goalColumn = edge.goal;
     if (_goalColumn == null) {
       final ls = await doc.lineStartOf(edge.caret);
-      _goalColumn = columnCount(await doc.readRangeString(ls, edge.caret - ls), tabSize: _tabSize);
+      _goalColumn = columnCount(
+        await doc.readRangeString(ls, edge.caret - ls),
+        tabSize: _tabSize,
+      );
     }
     final goal = _goalColumn;
     final off = await _verticalOnce(edge.caret, dir);
@@ -6911,7 +4974,8 @@ class _EditorViewState extends State<EditorView>
     final perLine = <String>[];
     final perBytes = <int>[];
     for (var i = 0; i < lines.length; i++) {
-      final full = padForColumn(lines[i], blk.leftCol, tabSize: _tabSize) + texts[i];
+      final full =
+          padForColumn(lines[i], blk.leftCol, tabSize: _tabSize) + texts[i];
       perLine.add(full);
       perBytes.add(doc.codec.encode(full).bytes.length);
     }
@@ -6949,12 +5013,19 @@ class _EditorViewState extends State<EditorView>
           )
         : null;
     final ci = starts.indexOf(blk.caretLine);
-    final padded = padForColumn(ci >= 0 ? lines[ci] : '', blk.leftCol, tabSize: _tabSize);
+    final padded = padForColumn(
+      ci >= 0 ? lines[ci] : '',
+      blk.leftCol,
+      tabSize: _tabSize,
+    );
     _caretOffset =
         caretLine +
         doc.codec
             .encode(
-              padded.substring(0, charIndexForColumn(padded, blk.leftCol, tabSize: _tabSize)),
+              padded.substring(
+                0,
+                charIndexForColumn(padded, blk.leftCol, tabSize: _tabSize),
+              ),
             )
             .bytes
             .length;
@@ -7059,8 +5130,13 @@ class _EditorViewState extends State<EditorView>
           // The line's content after the edit: the slice replaced by insert (only up to the
           // left edge + the inserted part is needed), including the padding a short line got
           // up to the left edge.
-          caretText.substring(0, charIndexForColumn(caretText, blk.leftCol, tabSize: _tabSize)) +
-              (insert.isEmpty ? '' : padForColumn(caretText, blk.leftCol, tabSize: _tabSize)) +
+          caretText.substring(
+                0,
+                charIndexForColumn(caretText, blk.leftCol, tabSize: _tabSize),
+              ) +
+              (insert.isEmpty
+                  ? ''
+                  : padForColumn(caretText, blk.leftCol, tabSize: _tabSize)) +
               insert,
           newLeft,
           byteLen: (s) => doc.codec.encode(s).bytes.length,
@@ -7080,7 +5156,9 @@ class _EditorViewState extends State<EditorView>
     final b = _colBlock;
     if (b == null) return false;
     if (!b.hasWidth) {
-      if (!b.multiLine) return false; // single-point selection → ordinary delete
+      if (!b.multiLine) {
+        return false; // single-point selection → ordinary delete
+      }
       final l = dir < 0 ? b.leftCol - 1 : b.leftCol;
       if (l < 0) return true; // already at the line start, nothing to delete
       _colBlock = ColumnBlock(
@@ -7098,6 +5176,7 @@ class _EditorViewState extends State<EditorView>
   // Insert text (replacing the selection). Consecutive inserts coalesce into one undo entry.
   // [autoIndent] false = a bare newline even when the setting is on
   // (shift+enter, edit.newlinePlain).
+  @override
   Future<void> _doInsert(String rawText, {bool autoIndent = true}) async {
     final doc = _doc;
     if (doc == null || rawText.isEmpty) return;
@@ -7128,7 +5207,8 @@ class _EditorViewState extends State<EditorView>
     if (_columnMode && _colBlock != null && !text.contains('\n')) {
       if (await _doBlockEdit(text)) return;
     }
-    _colBlock = null; // single-caret path → this edit shifts the old block's line starts, so it cannot stay
+    _colBlock =
+        null; // single-caret path → this edit shifts the old block's line starts, so it cannot stay
     if (_selEnd > _selStart) {
       final rev = await doc.delete(_selStart, _selEnd - _selStart);
       _undo.push(rev);
@@ -7182,7 +5262,7 @@ class _EditorViewState extends State<EditorView>
       final b = await doc.lineStartOf(_selEnd - 1);
       if (b > a) return _indentLines(1);
     }
-    if (!AppSettings.instance.insertSpaces) return _doInsert('\t');
+    if (!_insertSpaces) return _doInsert('\t');
     final at = _selEnd > _selStart ? _selStart : _caretOffset;
     final ls = await doc.lineStartOf(at);
     final len = at - ls;
@@ -7214,9 +5294,7 @@ class _EditorViewState extends State<EditorView>
       starts.add(ns);
       pos = ns;
     }
-    final unit = doc.codec
-        .encode(AppSettings.instance.insertSpaces ? ' ' * _tabSize : '\t')
-        .bytes;
+    final unit = doc.codec.encode(_insertSpaces ? ' ' * _tabSize : '\t').bytes;
     final reverses = <ReverseEdit>[];
     var delta = 0; // bytes added (removed when negative) in total
     // Bottom-up, so earlier offsets stay valid.
@@ -7323,6 +5401,7 @@ class _EditorViewState extends State<EditorView>
   // After an edit: re-read the window, ensure the caret is visible, repaint.
   // Inside a multi-cursor replay this is deferred to the loop's end; an edit
   // made outside the loop collapses the extra cursors (stale offsets).
+  @override
   Future<void> _afterEdit({bool keepCursors = false}) async {
     if (_inMulti) return;
     if (_multi && !keepCursors) _clearExtra();
@@ -7337,6 +5416,7 @@ class _EditorViewState extends State<EditorView>
     await _ensureCaretVisible();
     await _refreshBom(); // an edit at offset 0 (incl. undo) may add/remove it
     _scheduleBracketMatch();
+    _scheduleSearchMarks();
     if (mounted) setState(_restartBlink);
   }
 
@@ -7347,7 +5427,8 @@ class _EditorViewState extends State<EditorView>
     if (applied == null) return;
     _caretOffset = applied.caretAfterApply; // caret returns to the edit site
     _selAnchor = null;
-    _colBlock = null; // line starts may have shifted after undo/redo; the old rectangle cannot stay
+    _colBlock =
+        null; // line starts may have shifted after undo/redo; the old rectangle cannot stay
     _goalColumn = null;
     _setModified(_undo.isDirty); // undone back to the saved state = clean
     await _afterEdit();
@@ -7629,7 +5710,8 @@ class _EditorViewState extends State<EditorView>
   /// edit, the completion popup position).
   void _ensureContentW() {
     if (_hexMode) {
-      _contentW = _hexContentW; // hex rows have a fixed width, no measuring needed
+      _contentW =
+          _hexContentW; // hex rows have a fixed width, no measuring needed
       return;
     }
     final w = _window;
@@ -7667,6 +5749,7 @@ class _EditorViewState extends State<EditorView>
   int _pendingDelta = 0;
   bool _draining = false;
 
+  @override
   int get _visibleCount => (_viewportH / _lineHeight).ceil() + 1;
 
   Future<void> _open() async {
@@ -7689,7 +5772,8 @@ class _EditorViewState extends State<EditorView>
     setState(() => _opening = true);
     _bump();
     try {
-      await _doc?.close(); // the save flow may have closed it already → tolerate a double close
+      await _doc
+          ?.close(); // the save flow may have closed it already → tolerate a double close
     } catch (_) {}
     // A file the OS won't let us write opens read-only (the user can still
     // turn that off and Save As elsewhere); a manual read-only stays.
@@ -7701,8 +5785,12 @@ class _EditorViewState extends State<EditorView>
     if (!await _isWritable(path)) _readOnly = true;
     // Same for the layout direction: a manual toggle sticks to its path.
     if (path != _path) _rtlLayoutManual = false;
+    // And for the external-change prompt: "don't ask again" was about the file
+    // the user was looking at, not whatever this pane opens next.
+    if (path != _path) _extPromptSuppressed = false;
     final file = await Document.open(path, scanOriginalLineFeeds: false);
     await _recordDiskStamp(path);
+    await _applyEditorConfig(path);
     final kept = keepCodec == null ? null : textCodecByName(keepCodec);
     if (kept != null) {
       file.codec = kept;
@@ -7862,6 +5950,7 @@ class _EditorViewState extends State<EditorView>
     }
     widget.controller.docEpoch.value++; // outline panel: new content
     _scheduleWordScan();
+    _scheduleSearchMarks();
     _focus.requestFocus();
   }
 
@@ -7878,12 +5967,39 @@ class _EditorViewState extends State<EditorView>
     }
   }
 
+  // Nearest .editorconfig wins for this pane. Only the settings that the
+  // editor already has UI for are applied; the parser keeps the rest for
+  // future commands (trim trailing whitespace, final newline, EOL, max line).
+  Future<void> _applyEditorConfig(String path) async {
+    try {
+      final cfg = await loadEditorConfig(path);
+      if (!mounted) return;
+      setState(() {
+        _editorConfigTabSize = cfg.tabWidth;
+        _editorConfigInsertSpaces = cfg.insertSpaces;
+        _editorConfigTrimWs = cfg.trimTrailingWhitespace;
+        _editorConfigFinalNl = cfg.insertFinalNewline;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      Log.instance.d('editorconfig: $e');
+      setState(() {
+        _editorConfigTabSize = null;
+        _editorConfigInsertSpaces = null;
+        _editorConfigTrimWs = null;
+        _editorConfigFinalNl = null;
+      });
+    }
+  }
+
   // ── Read-only mode ──────────────────────────────────────────────
   // A UI guard, not a lock: every edit entry point asks _blockedReadOnly()
   // first. Set automatically when the file isn't writable, by the user via
   // File → Read-only mode, and while tail mode is on.
+  @override
   bool _readOnly = false;
 
+  @override
   bool _blockedReadOnly() {
     if (!_readOnly) return false;
     _toast(_l10n.tr('toast_read_only'));
@@ -8014,7 +6130,8 @@ class _EditorViewState extends State<EditorView>
 
   // Did another program modify the file on disk? Compare the stamp; on a
   // mismatch ask the user whether to reload (shell calls this on window
-  // focus / tab activation / a slow poll of the active pane).
+  // focus / tab activation / a slow poll of the active pane). "Don't ask
+  // again" suppresses the prompt for the rest of this file's life in the pane.
   Future<void> _checkExternalChange() async {
     final path = _path;
     if (path == null || _doc == null || _opening || _saving || _extDialogOpen) {
@@ -8034,14 +6151,17 @@ class _EditorViewState extends State<EditorView>
     final mtime = st.modified.microsecondsSinceEpoch;
     if (mtime == _diskMtimeUs && st.size == _diskSize) return;
     // Adopt the seen stamp BEFORE prompting: "ignore" means don't ask again
-    // until the file changes again.
+    // until the file changes again. Under "don't ask again" the stamp keeps
+    // tracking the disk, so a suppressed pane never shows a stale view of it.
     _diskMtimeUs = mtime;
     _diskSize = st.size;
+    if (_extPromptSuppressed) return;
     if (!mounted) return;
     _extDialogOpen = true;
     _bump();
     try {
-      final reload = await showDialog<bool>(
+      final choice = await showDialog<int>(
+        // ignore: use_build_context_synchronously
         context: context,
         builder: (ctx) => AlertDialog(
           title: Text(_l10n.tr('ext_change_title')),
@@ -8051,17 +6171,27 @@ class _EditorViewState extends State<EditorView>
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
+              onPressed: () => Navigator.of(ctx).pop(2),
+              child: Text(_l10n.tr('ext_change_never')),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(0),
               child: Text(_l10n.tr('common_ignore')),
             ),
             FilledButton(
-              onPressed: () => Navigator.of(ctx).pop(true),
+              onPressed: () => Navigator.of(ctx).pop(1),
               child: Text(_l10n.tr('common_reload')),
             ),
           ],
         ),
       );
-      if (reload == true && mounted) await _reloadFromDisk();
+      if (!mounted) return;
+      if (choice == 2) {
+        _extPromptSuppressed = true;
+        _toast(_l10n.tr('toast_ext_prompt_off'));
+      } else if (choice == 1) {
+        await _reloadFromDisk();
+      }
     } finally {
       _extDialogOpen = false;
     }
@@ -8111,6 +6241,7 @@ class _EditorViewState extends State<EditorView>
     _readOnly = false;
     _diskMtimeUs = null;
     _diskSize = null;
+    _extPromptSuppressed = false;
     _bookmarks.clear();
     _bookmarksPath = null;
     _bookmarksView = const {};
@@ -8120,6 +6251,10 @@ class _EditorViewState extends State<EditorView>
     setState(() {
       _doc = file;
       _path = null;
+      _editorConfigTabSize = null;
+      _editorConfigInsertSpaces = null;
+      _editorConfigTrimWs = null;
+      _editorConfigFinalNl = null;
       _anchorOffset = 0;
       _anchorLine = 0;
       _anchorLineExact = true;
@@ -8151,6 +6286,109 @@ class _EditorViewState extends State<EditorView>
     _restartBlink();
     _resetImeBaseline();
     _focus.requestFocus();
+  }
+
+  // A stashed untitled buffer (settings/untitled/<pane>.txt) coming back from
+  // the previous run: a blank untitled document, then the stashed bytes.
+  // The insert IS pushed onto the undo stack: the restored text is unsaved
+  // work, so the ● must survive "type one char, undo" (otherwise closing the
+  // tab would discard it without asking). Undoing the restore just gives a
+  // blank untitled pane, which is exactly as unsaved as it looks.
+  Future<void> _restoreUntitled(String stashPath) async {
+    await _newDocument();
+    final before = _doc;
+    if (!mounted || before == null) return;
+    Uint8List bytes;
+    try {
+      bytes = await File(stashPath).readAsBytes();
+    } catch (e) {
+      Log.instance.w('untitled stash unreadable: $stashPath: $e');
+      return;
+    }
+    if (bytes.isNotEmpty) {
+      await _runQueued(() async {
+        _undo.push(await before.insertBytes(0, bytes));
+      });
+      // The pane could have been closed / given a file while we awaited.
+      if (!mounted || !identical(_doc, before)) return;
+    }
+    // A manually chosen encoding survives the stash (the bytes are written
+    // as-is), so re-apply it before the caret/anchor are placed.
+    final enc = widget.initialEncoding;
+    if (enc != null) await _runQueued(() => _setEncodingNow(enc));
+    if (!mounted) return;
+    final doc = _doc;
+    if (doc == null) return;
+    final len = doc.length;
+    final unit = doc.codec.unitSize;
+    var anchor = widget.initialAnchor;
+    var caret = widget.initialCaret;
+    if (anchor < 0) anchor = 0;
+    if (caret < 0) caret = 0;
+    if (anchor > len) anchor = len;
+    if (caret > len) caret = len;
+    if (unit > 1) {
+      anchor -= anchor % unit;
+      caret -= caret % unit;
+    }
+    setState(() {
+      _anchorOffset = anchor;
+      _caretOffset = caret;
+    });
+    if (widget.initialBookmarks.isNotEmpty) {
+      _bookmarks.addAll(
+        widget.initialBookmarks.where((b) => b >= 0 && b <= len),
+      );
+      _bookmarksView = Set.unmodifiable(_bookmarks);
+    }
+    // An empty stash stays a plain blank tab (no bogus ●); anything else is
+    // unsaved work and must show it.
+    _setModified(_undo.isDirty);
+    _bump();
+    await _autoRtlUntitled();
+    await _detectNewline();
+    await _refreshBom();
+    // _newDocument read an empty window; the stashed bytes are only in the
+    // view after a re-read.
+    await _reload();
+    if (anchor > 0) {
+      final la = await doc.absoluteLineAt(anchor);
+      if (mounted) {
+        setState(() {
+          _anchorLine = la.line;
+          _anchorLineExact = la.exact;
+        });
+        // Same reason as in _loadDocument: the first _reload read the window
+        // as if it started at line 0, so the highlight lookup is off by the
+        // restored scroll offset.
+        await _reload();
+      }
+    }
+    widget.controller.docEpoch.value++; // outline panel: new content
+    _scheduleWordScan();
+    _scheduleSearchMarks();
+    _restartBlink();
+    _resetImeBaseline();
+    _focus.requestFocus();
+  }
+
+  // Write the document's bytes to [path] (the untitled-tab stash). Runs on
+  // the caret queue via EditorController.stashTo.
+  Future<void> _stashTo(String path) async {
+    final doc = _doc;
+    if (doc == null) return;
+    // Write next to the target and rename: the close path gives the session
+    // save 3 seconds, and a half-written stash must never replace a complete
+    // one (a truncated stash would silently restore as a shorter document).
+    final tmp = File('$path.tmp');
+    final sink = tmp.openWrite();
+    try {
+      await doc.streamTo(sink);
+      await sink.flush();
+    } finally {
+      await sink.close();
+    }
+    await tmp.rename(path);
   }
 
   // Untitled document: ask where to save, stream the content there, then
@@ -8192,7 +6430,7 @@ class _EditorViewState extends State<EditorView>
             : File(loc).parent.path;
         final tmp = '$dir$sep.${File(loc).uri.pathSegments.last}.tmp~';
         try {
-          final sink = File(tmp).openWrite();
+          final sink = _saveSink(File(tmp).openWrite(), doc);
           await doc.streamTo(sink);
           await sink.flush();
           await sink.close();
@@ -8204,7 +6442,7 @@ class _EditorViewState extends State<EditorView>
           rethrow;
         }
       } else {
-        final sink = File(loc).openWrite();
+        final sink = _saveSink(File(loc).openWrite(), doc);
         await doc.streamTo(sink);
         await sink.flush();
         await sink.close();
@@ -8607,7 +6845,7 @@ class _EditorViewState extends State<EditorView>
     var suspended = false;
     try {
       // 1. Stream out to the temp file
-      final sink = File(tmp).openWrite();
+      final sink = _saveSink(File(tmp).openWrite(), doc);
       await doc.streamTo(sink);
       await sink.flush();
       await sink.close();
@@ -8633,16 +6871,16 @@ class _EditorViewState extends State<EditorView>
         keepCodec: keepCodec,
         keepUndo: true,
       );
-      if (mounted) {
-        setState(() => _saving = false);
-        _bump();
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(_l10n.tr('toast_saved')),
-            duration: const Duration(milliseconds: 900),
-          ),
-        );
-      }
+      if (!mounted) return;
+      setState(() => _saving = false);
+      _bump();
+      // ignore: use_build_context_synchronously
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(_l10n.tr('toast_saved')),
+          duration: const Duration(milliseconds: 900),
+        ),
+      );
     } catch (e) {
       try {
         if (await File(tmp).exists()) await File(tmp).delete();
@@ -8652,13 +6890,13 @@ class _EditorViewState extends State<EditorView>
       // stays readable and the edits saveable — without this every later
       // save hit the closed handle and the work was stuck in memory.
       if (suspended) await _reopenAfterFailedReplace(doc);
-      if (mounted) {
-        setState(() => _saving = false);
-        _bump();
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(_l10n.trf('toast_save_failed', [e]))),
-        );
-      }
+      if (!mounted) return;
+      setState(() => _saving = false);
+      _bump();
+      // ignore: use_build_context_synchronously
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(_l10n.trf('toast_save_failed', [e]))),
+      );
     }
   }
 
@@ -8753,8 +6991,7 @@ class _EditorViewState extends State<EditorView>
   String _wrapBeforeOff = 'window';
 
   /// Effective wrap setting of this pane regardless of view mode.
-  String get wrapSetting =>
-      _wrapOverride ?? AppSettings.instance.softWrapMode;
+  String get wrapSetting => _wrapOverride ?? AppSettings.instance.softWrapMode;
 
   void _setWrapOverride(String mode) {
     if (!AppSettings.softWrapModeChoices.contains(mode)) return;
@@ -8788,7 +7025,8 @@ class _EditorViewState extends State<EditorView>
   List<int> Function(String)? get _wrapMeasure {
     if (_wrapMode != 'window') return null;
     final w = _textViewW;
-    return (line) => measuredWrapBoundaries(line, w);
+    final zoom = _zoom;
+    return (line) => measuredWrapBoundaries(line, w, zoom: zoom);
   }
 
   // Whether wrapping is in effect (decides whether scrolling works in visual rows).
@@ -8809,7 +7047,7 @@ class _EditorViewState extends State<EditorView>
     }
     final cols = _wrapColumns;
     _rowsKey =
-        '$_wrapMode/$cols/${_wrapMode == 'window' ? _textViewW.round() : 0}';
+        '$_wrapMode/$cols/${_wrapMode == 'window' ? _textViewW.round() : 0}/$_zoom';
     _rows = wrapWindow(
       win.lines,
       win.offsets,
@@ -8931,7 +7169,9 @@ class _EditorViewState extends State<EditorView>
     // the other visible panes) unless this scroll IS such a forward.
     if (!_syncApplying) widget.controller.onScrollRows?.call(n);
     if (_hexMode) {
-      _hexScrollRows(n); // hex: a row = a fixed 16 bytes, no need for the line-scan queue
+      _hexScrollRows(
+        n,
+      ); // hex: a row = a fixed 16 bytes, no need for the line-scan queue
       return;
     }
     _pendingDelta += n;
@@ -9118,7 +7358,9 @@ class _EditorViewState extends State<EditorView>
     }
     final target = (f.clamp(0.0, 1.0) * file.size).round();
     final off = await file.alignToLineStart(target);
-    final la = await file.absoluteLineAt(off); // exact within the indexed prefix, else estimated
+    final la = await file.absoluteLineAt(
+      off,
+    ); // exact within the indexed prefix, else estimated
     _anchorLineExact = la.exact;
     await _setAnchor(off, la.line);
   }
@@ -9140,7 +7382,8 @@ class _EditorViewState extends State<EditorView>
     }
     final line = (oneBased - 1).clamp(0, file.absoluteLineCount - 1);
     final off = await file.byteOffsetOfLine(line);
-    _anchorLineExact = true; // the line number is user-specified, so treat it as exact
+    _anchorLineExact =
+        true; // the line number is user-specified, so treat it as exact
     await _setAnchor(off, line);
     // The caret goes to that line too (VS Code semantics), which also lets
     // Go Back return to where the user came from. An optional column
@@ -9260,9 +7503,7 @@ class _EditorViewState extends State<EditorView>
     // Editing control keys (when not composing): edit the document directly.
     // (Character input and Enter arrive as IME deltas; backspace/delete produce no delta
     // because the baseline is empty, so they are handled here.)
-    if (_composing.isEmpty &&
-        _doc != null &&
-        !Mods.ctrl) {
+    if (_composing.isEmpty && _doc != null && !Mods.ctrl) {
       final k = e.logicalKey;
       if (k == LogicalKeyboardKey.backspace) {
         _enqueueCaret(() async {
@@ -9272,11 +7513,14 @@ class _EditorViewState extends State<EditorView>
         _recordStep(const MacroKey('backspace'));
         return KeyEventResult.handled;
       }
-      if (k == LogicalKeyboardKey.delete) {
+      if (k == LogicalKeyboardKey.delete && !Mods.shift) {
         _enqueueCaret(() => _forEachCursor((_) => _doDeleteForward()));
         _recordStep(const MacroKey('delete'));
         return KeyEventResult.handled;
       }
+      // shift+delete is NOT taken here: on Windows it deletes the same as plain
+      // delete, so the chord is left to the resolver — a user keymap can bind
+      // it (e.g. edit.cut). Unbound, it still does nothing.
       if (k == LogicalKeyboardKey.tab) {
         final shift = Mods.shift;
         _enqueueCaret(
@@ -9326,7 +7570,8 @@ class _EditorViewState extends State<EditorView>
         Log.instance.d('key: no binding for ${chord.canonical}');
         _chordTimer?.cancel();
         setState(() {});
-        return KeyEventResult.ignored; // let it through (a read-only viewer has no text input)
+        return KeyEventResult
+            .ignored; // let it through (a read-only viewer has no text input)
     }
   }
 
@@ -9348,7 +7593,8 @@ class _EditorViewState extends State<EditorView>
         _hexInsertMode = !_hexInsertMode;
         _hexNibble = 0;
       });
-      _undo.breakCoalescing(); // mode change → the next edit is its own undo entry
+      _undo
+          .breakCoalescing(); // mode change → the next edit is its own undo entry
       return KeyEventResult.handled;
     }
     // Tab: switch input focus between the hex and ascii columns (ctrl+tab is reserved for
@@ -9486,6 +7732,7 @@ class _EditorViewState extends State<EditorView>
     _foldTimer?.cancel();
     _wordScanTimer?.cancel();
     _bracketTimer?.cancel();
+    _searchMarksTimer?.cancel();
     _fullHlDebounce?.cancel();
     _hlSession?.close();
     _hlSession = null;
@@ -9497,6 +7744,7 @@ class _EditorViewState extends State<EditorView>
     UserKeymap.instance.removeListener(_onUserKeymapChanged);
     AppSettings.instance.removeListener(_onSettingsChanged);
     _focus.removeListener(_onFocusChange);
+    _searchCtl.removeListener(_scheduleSearchMarks);
     _jumpCtrl.dispose();
     _focus.dispose();
     _searchCtl.dispose();
@@ -9508,219 +7756,6 @@ class _EditorViewState extends State<EditorView>
     super.dispose();
   }
 
-  // The find bar above the viewport: pattern field + regex/case toggles +
-  // prev/next/close. Esc closes, Enter finds next (F3 / shift+F3 also work
-  // here — the keys bubble up from the field to this Focus).
-  Widget _buildSearchBar() {
-    Widget toggle(String label, String tooltip, bool on, VoidCallback flip) =>
-        Tooltip(
-          message: tooltip,
-          child: InkWell(
-            onTap: () {
-              flip();
-              _searchFocus.requestFocus();
-            },
-            borderRadius: BorderRadius.circular(4),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-              decoration: BoxDecoration(
-                color: on ? _selColor : null,
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: Text(
-                label,
-                style: TextStyle(
-                  color: on ? _fg : _gutterFg,
-                  fontSize: 12,
-                  fontFamily: editorMonoFont,
-                ),
-              ),
-            ),
-          ),
-        );
-
-    Widget btn(IconData icon, String tooltip, VoidCallback? onTap) =>
-        IconButton(
-          icon: Icon(icon, size: 16),
-          tooltip: tooltip,
-          color: _gutterFg,
-          padding: EdgeInsets.zero,
-          constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-          onPressed: onTap,
-        );
-
-    return Focus(
-      onKeyEvent: (node, e) {
-        if (e is! KeyDownEvent) return KeyEventResult.ignored;
-        if (e.logicalKey == LogicalKeyboardKey.escape) {
-          _closeSearch();
-          return KeyEventResult.handled;
-        }
-        if (e.logicalKey == LogicalKeyboardKey.f3) {
-          _find(forward: !Mods.shift);
-          return KeyEventResult.handled;
-        }
-        // VS Code's find-widget toggles: alt+c case, alt+r regex,
-        // alt+w whole word, alt+l in selection.
-        if (HardwareKeyboard.instance.isAltPressed && !_byteSearch) {
-          final k = e.logicalKey;
-          if (k == LogicalKeyboardKey.keyC) {
-            setState(() => _searchCase = !_searchCase);
-            return KeyEventResult.handled;
-          }
-          if (k == LogicalKeyboardKey.keyR) {
-            setState(() => _searchRegex = !_searchRegex);
-            return KeyEventResult.handled;
-          }
-          if (k == LogicalKeyboardKey.keyW) {
-            setState(() => _searchWord = !_searchWord);
-            return KeyEventResult.handled;
-          }
-          if (k == LogicalKeyboardKey.keyL) {
-            _toggleSearchInSel();
-            return KeyEventResult.handled;
-          }
-        }
-        return KeyEventResult.ignored;
-      },
-      child: Container(
-        color: _chromeBg,
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.search, size: 16, color: _gutterFg),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: TextField(
-                    controller: _searchCtl,
-                    focusNode: _searchFocus,
-                    style: TextStyle(color: _fg, fontSize: 13),
-                    cursorColor: _caretColor,
-                    decoration: InputDecoration(
-                      isDense: true,
-                      border: InputBorder.none,
-                      hintText: _l10n.tr(
-                        _byteSearch ? 'search_hint_hex' : 'search_hint',
-                      ),
-                      hintStyle: TextStyle(color: _gutterFg, fontSize: 13),
-                    ),
-                    onSubmitted: (_) {
-                      _find(forward: true);
-                      _searchFocus.requestFocus(); // keep typing/enter cycling
-                    },
-                  ),
-                ),
-                const SizedBox(width: 4),
-                // Hex mode: bytes toggle; regex/case only apply to text.
-                if (_hexMode) ...[
-                  toggle(
-                    '0x',
-                    _l10n.tr('tip_search_hex'),
-                    _searchHex,
-                    () => setState(() => _searchHex = !_searchHex),
-                  ),
-                  const SizedBox(width: 4),
-                ],
-                if (!_byteSearch) ...[
-                  toggle(
-                    '.*',
-                    _l10n.tr('tip_search_regex'),
-                    _searchRegex,
-                    () => setState(() => _searchRegex = !_searchRegex),
-                  ),
-                  const SizedBox(width: 4),
-                  toggle(
-                    'Aa',
-                    _l10n.tr('tip_search_case'),
-                    _searchCase,
-                    () => setState(() => _searchCase = !_searchCase),
-                  ),
-                  const SizedBox(width: 4),
-                  toggle(
-                    'ab',
-                    _l10n.tr('tip_search_word'),
-                    _searchWord,
-                    () => setState(() => _searchWord = !_searchWord),
-                  ),
-                  const SizedBox(width: 4),
-                  toggle(
-                    '≡',
-                    _l10n.tr('tip_search_in_sel'),
-                    _searchInSel,
-                    _toggleSearchInSel,
-                  ),
-                  const SizedBox(width: 4),
-                ],
-                if (_searching)
-                  const SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                else ...[
-                  btn(
-                    Icons.keyboard_arrow_up,
-                    _l10n.tr('tip_search_prev'),
-                    () => _find(forward: false),
-                  ),
-                  btn(
-                    Icons.keyboard_arrow_down,
-                    _l10n.tr('tip_search_next'),
-                    () => _find(forward: true),
-                  ),
-                ],
-                btn(Icons.close, _l10n.tr('tip_search_close'), _closeSearch),
-              ],
-            ),
-            if (_replaceOpen)
-              Row(
-                children: [
-                  Icon(Icons.find_replace, size: 16, color: _gutterFg),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: TextField(
-                      controller: _replaceCtl,
-                      focusNode: _replaceFocus,
-                      style: TextStyle(color: _fg, fontSize: 13),
-                      cursorColor: _caretColor,
-                      decoration: InputDecoration(
-                        isDense: true,
-                        border: InputBorder.none,
-                        hintText: _l10n.tr('replace_hint'),
-                        hintStyle: TextStyle(color: _gutterFg, fontSize: 13),
-                      ),
-                      onSubmitted: (_) {
-                        _replaceCurrent();
-                        _replaceFocus.requestFocus();
-                      },
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  TextButton(
-                    onPressed: _searching ? null : _replaceCurrent,
-                    child: Text(
-                      _l10n.tr('btn_replace'),
-                      style: const TextStyle(fontSize: 12),
-                    ),
-                  ),
-                  TextButton(
-                    onPressed: _searching ? null : _replaceAll,
-                    child: Text(
-                      _l10n.tr('btn_replace_all'),
-                      style: const TextStyle(fontSize: 12),
-                    ),
-                  ),
-                ],
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final file = _doc;
@@ -9730,7 +7765,9 @@ class _EditorViewState extends State<EditorView>
     if (winChanged && !_hexMode) {
       _hlWindow = _window;
       final m = _maxScrollX;
-      if (!_rtlLayoutActive && _scrollX > m) _scrollX = m; // the new window is narrower → clamp back
+      if (!_rtlLayoutActive && _scrollX > m) {
+        _scrollX = m; // the new window is narrower → clamp back
+      }
     }
     if (_rtlLayoutActive) {
       // Mirrored scroll origin: keep the distance from the right edge.
@@ -9751,7 +7788,7 @@ class _EditorViewState extends State<EditorView>
     }
     // Window / spans / wrap columns changed → re-expand the visual rows.
     final rowsKey =
-        '$_wrapMode/$_wrapColumns/${_wrapMode == 'window' ? _textViewW.round() : 0}';
+        '$_wrapMode/$_wrapColumns/${_wrapMode == 'window' ? _textViewW.round() : 0}/$_zoom';
     if (spansChanged || _rowsKey != rowsKey) {
       final sw = Stopwatch()..start();
       _rebuildRows();
@@ -9815,8 +7852,7 @@ class _EditorViewState extends State<EditorView>
                                   return;
                                 }
                                 // shift+wheel → horizontal scroll; a trackpad's dx is horizontal too
-                                final shift =
-                                    Mods.shift;
+                                final shift = Mods.shift;
                                 final dx =
                                     sig.scrollDelta.dx +
                                     (shift ? sig.scrollDelta.dy : 0);
@@ -9869,6 +7905,12 @@ class _EditorViewState extends State<EditorView>
                                 // by words. Otherwise the press already
                                 // placed the caret / selected the unit.
                                 if (!_pressHandled) _onPress(_pressPos);
+                                // Arrow only when moving the selection; a
+                                // drag-select keeps the I-beam.
+                                if (_dragMode == _DragMode.move &&
+                                    !_dragCursor) {
+                                  setState(() => _dragCursor = true);
+                                }
                               },
                               onTapUp: (d) {
                                 // Click inside the selection without a
@@ -9881,6 +7923,10 @@ class _EditorViewState extends State<EditorView>
                               },
                               onPanUpdate: (d) {
                                 if (_pressAlt) {
+                                  return;
+                                }
+                                if (_dragMode != _DragMode.move &&
+                                    _dragScrollUp(d.localPosition)) {
                                   return;
                                 }
                                 switch (_dragMode) {
@@ -9898,14 +7944,18 @@ class _EditorViewState extends State<EditorView>
                               },
                               onPanEnd: (_) {
                                 if (_dragMode == _DragMode.move) {
-                                  _moveDragDrop(
-                                    copy: Mods.ctrl,
-                                  );
+                                  _moveDragDrop(copy: Mods.ctrl);
+                                }
+                                if (_dragCursor) {
+                                  setState(() => _dragCursor = false);
                                 }
                               },
                               onPanCancel: () {
                                 if (_dragMode == _DragMode.move) {
                                   _moveDragCancel();
+                                }
+                                if (_dragCursor) {
+                                  setState(() => _dragCursor = false);
                                 }
                               },
                               child: Focus(
@@ -9914,57 +7964,87 @@ class _EditorViewState extends State<EditorView>
                                 child: Stack(
                                   children: [
                                     Positioned.fill(
-                                      child: _hexMode
-                                          ? HexViewport(
-                                              key: _hexKey,
-                                              bytes: _hexBytes,
-                                              base: _anchorOffset,
-                                              docLength: file.length,
-                                              caretOffset: _caretForPaint,
-                                              caretNibble: _hexNibble,
-                                              activeArea: _hexArea,
-                                              insertMode: _hexInsertMode,
-                                              caretOn: _caretOn,
-                                              caretFocused: _caretFocused,
-                                              selStart: _selStart,
-                                              selEnd: _selEnd,
-                                              scrollX: _scrollX,
-                                              settingsEpoch: _settingsEpoch,
-                                              textCells: _hexCells,
-                                              composing: _composing,
-                                            )
-                                          : TextViewport(
-                                              window: _window,
-                                              rows: _rows,
-                                              rowSpans: _rowSpans,
-                                              anchorLine: _anchorLine,
-                                              anchorOffset: _anchorOffset,
-                                              totalBytes: file.size,
-                                              caretOffset: _caretForPaint,
-                                              caretAtRowEnd: _caretAtRowEnd,
-                                              smartWord: _smartWord,
-                                              selStart: _selStart,
-                                              selEnd: _selEnd,
-                                              block: _columnMode
-                                                  ? _colBlock
-                                                  : null,
-                                              caretOn: _caretOn,
-                                              caretFocused: _caretFocused,
-                                              composing: _composing,
-                                              spans: _spans,
-                                              scrollX: _scrollX,
-                                              contentW: _contentW,
-                                              rtlMode: _rtlMode,
-                                              settingsEpoch: _settingsEpoch,
-                                              bookmarks: _bookmarksView,
-                                              brackets: _bracketPair,
-                                              extraCarets: _extraCaretsView,
-                                              extraSels: _extraSelsView,
-                                              foldable: _foldableView,
-                                              folded: _foldedView,
-                                              dropCaret: _dropOffset,
-                                            ),
+                                      // I-beam over the text area (an arrow
+                                      // while a drag is in progress); the
+                                      // scrollbar zones below override it.
+                                      child: MouseRegion(
+                                        cursor: _dragCursor
+                                            ? SystemMouseCursors.basic
+                                            : SystemMouseCursors.text,
+                                        child: _hexMode
+                                            ? HexViewport(
+                                                key: _hexKey,
+                                                bytes: _hexBytes,
+                                                base: _anchorOffset,
+                                                docLength: file.length,
+                                                caretOffset: _caretForPaint,
+                                                caretNibble: _hexNibble,
+                                                activeArea: _hexArea,
+                                                insertMode: _hexInsertMode,
+                                                caretOn: _caretOn,
+                                                caretFocused: _caretFocused,
+                                                selStart: _selStart,
+                                                selEnd: _selEnd,
+                                                scrollX: _scrollX,
+                                                settingsEpoch: _settingsEpoch,
+                                                textCells: _hexCells,
+                                                composing: _composing,
+                                                zoom: _zoom,
+                                              )
+                                            : TextViewport(
+                                                window: _window,
+                                                rows: _rows,
+                                                rowSpans: _rowSpans,
+                                                anchorLine: _anchorLine,
+                                                anchorOffset: _anchorOffset,
+                                                totalBytes: file.size,
+                                                caretOffset: _caretForPaint,
+                                                caretAtRowEnd: _caretAtRowEnd,
+                                                smartWord: _smartWord,
+                                                selStart: _selStart,
+                                                selEnd: _selEnd,
+                                                block: _columnMode
+                                                    ? _colBlock
+                                                    : null,
+                                                caretOn: _caretOn,
+                                                caretFocused: _caretFocused,
+                                                composing: _composing,
+                                                spans: _spans,
+                                                scrollX: _scrollX,
+                                                contentW: _contentW,
+                                                rtlMode: _rtlMode,
+                                                settingsEpoch: _settingsEpoch,
+                                                bookmarks: _bookmarksView,
+                                                searchMarks: _searchMarksView,
+                                                searchScope: _searchScope,
+                                                brackets: _bracketPair,
+                                                extraCarets: _extraCaretsView,
+                                                extraSels: _extraSelsView,
+                                                foldable: _foldableView,
+                                                folded: _foldedView,
+                                                dropCaret: _dropOffset,
+                                                zoom: _zoom,
+                                                tabSize: _tabSize,
+                                              ),
+                                      ),
                                     ),
+                                    // Arrow over the line-number gutter (as
+                                    // in VS Code). Not opaque: hover still
+                                    // reaches the viewport below.
+                                    if (!_hexMode)
+                                      Positioned(
+                                        top: 0,
+                                        bottom: 0,
+                                        left: 0,
+                                        width: _gutterWidthFor(
+                                          _anchorLine,
+                                          _window?.lines.length ?? 0,
+                                        ),
+                                        child: const MouseRegion(
+                                          cursor: SystemMouseCursors.basic,
+                                          opaque: false,
+                                        ),
+                                      ),
                                     if (_completion != null && !_hexMode)
                                       _completionPopup(),
                                     // Right-hand scrollbar drag zone: byte-fraction jump
@@ -9973,16 +8053,19 @@ class _EditorViewState extends State<EditorView>
                                       bottom: 0,
                                       right: 0,
                                       width: 16,
-                                      child: GestureDetector(
-                                        behavior: HitTestBehavior.translucent,
-                                        supportedDevices: _pointerDragDevices,
-                                        onTapDown: (d) => _jumpFraction(
-                                          d.localPosition.dy / h,
+                                      child: MouseRegion(
+                                        cursor: SystemMouseCursors.basic,
+                                        child: GestureDetector(
+                                          behavior: HitTestBehavior.translucent,
+                                          supportedDevices: _pointerDragDevices,
+                                          onTapDown: (d) => _jumpFraction(
+                                            d.localPosition.dy / h,
+                                          ),
+                                          onVerticalDragUpdate: (d) =>
+                                              _jumpFraction(
+                                                d.localPosition.dy / h,
+                                              ),
                                         ),
-                                        onVerticalDragUpdate: (d) =>
-                                            _jumpFraction(
-                                              d.localPosition.dy / h,
-                                            ),
                                       ),
                                     ),
                                     // Bottom horizontal scrollbar drag zone (mounted only
@@ -9995,13 +8078,18 @@ class _EditorViewState extends State<EditorView>
                                         right: 16,
                                         bottom: 0,
                                         height: 14,
-                                        child: GestureDetector(
-                                          behavior: HitTestBehavior.translucent,
-                                          supportedDevices: _pointerDragDevices,
-                                          onTapDown: (d) =>
-                                              _hScrollTo(d.localPosition.dx),
-                                          onHorizontalDragUpdate: (d) =>
-                                              _hScrollTo(d.localPosition.dx),
+                                        child: MouseRegion(
+                                          cursor: SystemMouseCursors.basic,
+                                          child: GestureDetector(
+                                            behavior:
+                                                HitTestBehavior.translucent,
+                                            supportedDevices:
+                                                _pointerDragDevices,
+                                            onTapDown: (d) =>
+                                                _hScrollTo(d.localPosition.dx),
+                                            onHorizontalDragUpdate: (d) =>
+                                                _hScrollTo(d.localPosition.dx),
+                                          ),
                                         ),
                                       ),
                                   ],
@@ -10022,6 +8110,7 @@ class _EditorViewState extends State<EditorView>
 
   // Go to line: an inline input bar in the style of the search bar (requires the index).
   // Mutually exclusive with the search bar, so two bars never stack above the edit area.
+  @override
   bool _gotoOpen = false;
   final TextEditingController _gotoCtl = TextEditingController();
   final FocusNode _gotoFocus = FocusNode();
@@ -10155,28 +8244,6 @@ class _EditorViewState extends State<EditorView>
         ),
       ),
     );
-  }
-
-  // Left segment of the status bar in hex mode: the current row's offset + the value of the
-  // byte under the caret.
-  String _hexStatusText(Document file) {
-    final o = _caretOffset;
-    final i = o - _anchorOffset;
-    final b = (i >= 0 && i < _hexBytes.length) ? _hexBytes[i] : null;
-    final hex = o.toRadixString(16).toUpperCase().padLeft(8, '0');
-    final val = b == null
-        ? ''
-        : _l10n.trf('hex_value_fmt', [
-            b.toRadixString(16).toUpperCase().padLeft(2, '0'),
-            b.toString().padLeft(3),
-          ]);
-    final area = _hexArea == HexArea.hex
-        ? _l10n.trf('hex_area_fmt', [
-            _l10n.tr(_hexNibble == 0 ? 'hex_high' : 'hex_low'),
-          ])
-        : 'ASCII';
-    final mode = _hexInsertMode ? 'INS' : 'OVR';
-    return _l10n.trf('hex_status_fmt', [area, mode, hex, val]);
   }
 
   // The status bar's selection field: column mode reports the rectangle's size (the column
@@ -10374,6 +8441,29 @@ class _EditorViewState extends State<EditorView>
                         _encodingText(file),
                         style: TextStyle(color: _gutterFg, fontSize: 12),
                       ),
+                      // This tab's zoom, only when not 100% (otherwise a
+                      // bigger font in one tab is a mystery); click resets.
+                      if (_zoom != 1) ...[
+                        const SizedBox(width: 16),
+                        Tooltip(
+                          message: _l10n.tr('item_zoom_reset'),
+                          child: MouseRegion(
+                            cursor: SystemMouseCursors.click,
+                            child: GestureDetector(
+                              onTap: () => zoomFont(0),
+                              child: Text(
+                                '${(_zoom * 100).round()}%',
+                                style: TextStyle(
+                                  color: _gutterFg,
+                                  fontSize: 12,
+                                  decoration: TextDecoration.underline,
+                                  decorationColor: _gutterFg,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                       // Index state: nothing once indexed (the normal case),
                       // progress while building, otherwise a link to an
                       // explanation dialog that can also start the build.
@@ -10444,278 +8534,4 @@ class _EditorViewState extends State<EditorView>
       ),
     );
   }
-}
-
-// A user-script failure inside the transform callback; toString is the bare
-// message (a StateError would prefix the toast with "Bad state:").
-class _ScriptRunError implements Exception {
-  _ScriptRunError(this.message);
-  final String message;
-  @override
-  String toString() => message;
-}
-
-// Word-count dialog: streams the byte range through StatsAccumulator with a
-// progress bar; counting stops when the dialog is dismissed. Chunk edges are
-// re-aligned to character boundaries (the trailing, possibly cut char of
-// each chunk is dropped and re-read next round, surrogate pairs included).
-/// Modal "working…" dialog (indeterminate) for a long run such as a user
-/// script; closes itself when [done] completes and cannot be dismissed.
-class _BusyDialog extends StatefulWidget {
-  const _BusyDialog({
-    required this.title,
-    required this.body,
-    required this.done,
-    this.onCancel,
-  });
-  final String title;
-  final String body;
-  final Future<void> done;
-
-  /// When given, a Cancel button asks the work to stop (the dialog still
-  /// closes only once [done] completes).
-  final VoidCallback? onCancel;
-
-  @override
-  State<_BusyDialog> createState() => _BusyDialogState();
-}
-
-class _BusyDialogState extends State<_BusyDialog> {
-  @override
-  void initState() {
-    super.initState();
-    widget.done.whenComplete(() {
-      if (mounted) Navigator.of(context).pop();
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) => PopScope(
-    canPop: false,
-    child: AlertDialog(
-      title: Text(widget.title),
-      content: SizedBox(
-        width: 360,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(widget.body),
-            const SizedBox(height: 12),
-            const LinearProgressIndicator(),
-          ],
-        ),
-      ),
-      actions: widget.onCancel == null
-          ? null
-          : [
-              TextButton(
-                onPressed: widget.onCancel,
-                child: Text(AppLocalizations.of(context).tr('common_cancel')),
-              ),
-            ],
-    ),
-  );
-}
-
-/// Modal progress shown while the first edit of a big file waits for the line
-/// index (see _EditorViewState._onIndexWait). Closes itself when [done]
-/// completes; cannot be dismissed — the edit is already committed to waiting.
-class _IndexWaitDialog extends StatefulWidget {
-  const _IndexWaitDialog({required this.doc, required this.done});
-  final Document doc;
-  final Future<void> done;
-
-  @override
-  State<_IndexWaitDialog> createState() => _IndexWaitDialogState();
-}
-
-class _IndexWaitDialogState extends State<_IndexWaitDialog> {
-  StreamSubscription<IndexProgress>? _sub;
-
-  @override
-  void initState() {
-    super.initState();
-    _sub = widget.doc.progress.listen((_) {
-      if (mounted) setState(() {});
-    });
-    widget.done.whenComplete(() {
-      if (mounted) Navigator.of(context).pop();
-    });
-  }
-
-  @override
-  void dispose() {
-    _sub?.cancel();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final l10n = AppLocalizations.of(context);
-    final pct = (widget.doc.fractionIndexed * 100).floor();
-    return PopScope(
-      canPop: false,
-      child: AlertDialog(
-        title: Text(l10n.tr('index_wait_title')),
-        content: SizedBox(
-          width: 360,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(l10n.tr('index_wait_body')),
-              const SizedBox(height: 12),
-              LinearProgressIndicator(value: widget.doc.fractionIndexed),
-              const SizedBox(height: 8),
-              Text(l10n.trf('status_indexing', [pct])),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _WordCountDialog extends StatefulWidget {
-  const _WordCountDialog({
-    required this.doc,
-    required this.start,
-    required this.end,
-    required this.selection,
-  });
-
-  final Document doc;
-  final int start;
-  final int end;
-  final bool selection;
-
-  @override
-  State<_WordCountDialog> createState() => _WordCountDialogState();
-}
-
-class _WordCountDialogState extends State<_WordCountDialog> {
-  TextStats? _stats;
-  double _progress = 0;
-  bool _disposed = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _run();
-  }
-
-  @override
-  void dispose() {
-    _disposed = true;
-    super.dispose();
-  }
-
-  Future<void> _run() async {
-    final acc = StatsAccumulator();
-    final end = widget.end;
-    final total = end - widget.start;
-    var pos = widget.start;
-    while (pos < end) {
-      if (_disposed) return;
-      final readLen = (end - pos) < (1 << 20) ? (end - pos) : (1 << 20);
-      final d = await widget.doc.readRangeDecoded(pos, readLen);
-      final text = d.text;
-      var nextPos = pos + readLen;
-      if (pos + readLen < end && text.length > 1) {
-        // Drop the final (possibly cut) char; a low surrogate at the end
-        // means the pair starts one unit earlier.
-        var cut = text.length - 1;
-        final cu = text.codeUnitAt(cut);
-        if (cu >= 0xDC00 && cu <= 0xDFFF && cut > 0) cut--;
-        acc.feed(text.substring(0, cut));
-        final aligned = pos + d.byteForCodeUnit(cut);
-        nextPos = aligned > pos ? aligned : pos + readLen;
-      } else {
-        acc.feed(text);
-      }
-      pos = nextPos;
-      if (mounted && total > 0) {
-        setState(() => _progress = (pos - widget.start) / total);
-      }
-    }
-    if (mounted) setState(() => _stats = acc.finish(total));
-  }
-
-  static String _n(int v) {
-    final s = '$v';
-    final sb = StringBuffer();
-    for (var i = 0; i < s.length; i++) {
-      if (i > 0 && (s.length - i) % 3 == 0) sb.write(',');
-      sb.write(s[i]);
-    }
-    return sb.toString();
-  }
-
-  Widget _row(String label, String value) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 2),
-    child: Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [Text(label), const SizedBox(width: 32), Text(value)],
-    ),
-  );
-
-  @override
-  Widget build(BuildContext context) {
-    final l10n = AppLocalizations.of(context);
-    final st = _stats;
-    return AlertDialog(
-      title: Text(l10n.tr('wc_title')),
-      content: ResizableDialogBox(
-        id: 'wordCount',
-        initialWidth: 320,
-        child: st == null
-            ? Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  LinearProgressIndicator(value: _progress),
-                  const SizedBox(height: 8),
-                  Text('${(_progress * 100).floor()}%'),
-                ],
-              )
-            : Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Text(
-                    l10n.tr(widget.selection ? 'wc_scope_sel' : 'wc_scope_all'),
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                  const SizedBox(height: 8),
-                  _row(l10n.tr('wc_lines'), _n(st.lines)),
-                  _row(l10n.tr('wc_chars'), _n(st.chars)),
-                  _row(l10n.tr('wc_chars_no_ws'), _n(st.charsNoWs)),
-                  _row(l10n.tr('wc_words'), _n(st.words)),
-                  _row(l10n.tr('wc_cjk'), _n(st.cjk)),
-                  _row(l10n.tr('wc_bytes'), _n(st.bytes)),
-                ],
-              ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: Text(l10n.tr('common_close')),
-        ),
-      ],
-    );
-  }
-}
-
-/// State of the word-completion popup (see _EditorViewState._completion).
-class _CompletionState {
-  _CompletionState({
-    required this.prefix,
-    required this.items,
-    required this.selected,
-    required this.anchor,
-  });
-  final String prefix;
-  final List<Completion> items;
-  int selected;
-  final Offset anchor; // just below the caret, viewport coordinates
 }

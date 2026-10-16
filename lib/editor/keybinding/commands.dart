@@ -275,6 +275,7 @@ class CommandRegistry {
       'file.openRecent',
       'search.replaceInFiles',
       'syntax.picker',
+      'view.symbols',
       'view.splitRight',
     ]) {
       r.register(action, (ed, a, n) => ed.menuAction(action));

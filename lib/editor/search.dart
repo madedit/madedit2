@@ -253,6 +253,42 @@ Future<SearchMatch?> searchBackward(Document doc, RegExp re, int before) async {
   }
 }
 
+/// All matches in [from, to) (document byte offsets), walking the same
+/// windows as [searchForward]. For the scrollbar marks: capped at
+/// [maxMatches] hits and [maxScanBytes] scanned bytes, so a huge file only
+/// pays a bounded scan (the marks are then partial).
+Future<List<SearchMatch>> collectMatches(
+  Document doc,
+  RegExp re, {
+  int from = 0,
+  int? to,
+  int maxMatches = 5000,
+  int maxScanBytes = 64 << 20,
+}) async {
+  final out = <SearchMatch>[];
+  final end = to != null && to < doc.length ? to : doc.length;
+  final overlap = searchOverlapFor(re);
+  var pos = from;
+  var scanned = 0;
+  while (pos < end) {
+    final w = await scanSearchWindow(doc, re, pos, overlap: overlap);
+    final d = w.text;
+    for (final m in w.matches) {
+      if (!w.atEnd && m.start >= w.cutCu) break; // belongs to the next window
+      final sb = pos + d.byteForCodeUnit(m.start);
+      if (to != null && sb >= to) return out;
+      out.add(SearchMatch(sb, pos + d.byteForCodeUnit(m.end), _groupsOf(m)));
+      if (out.length >= maxMatches) return out;
+    }
+    if (w.atEnd) break;
+    final adv = d.byteForCodeUnit(w.cutCu);
+    pos += adv;
+    scanned += adv;
+    if (scanned >= maxScanBytes) break;
+  }
+  return out;
+}
+
 // ── Byte-sequence search (hex mode) ───────────────────────────────────────
 
 /// Parse a hex byte pattern into byte values, `null` = any byte (`??`).
